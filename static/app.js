@@ -24,7 +24,7 @@ const OPT_FIELDS = [
   ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["cjk_spacing", "中文與英文／數字之間加半形空格", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
-  ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字高亮（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
+  ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
   ["target_lang", "目標語言", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
 ];
 
@@ -663,7 +663,7 @@ function renderPlan() {
         ${ch.clips.map((c, k) => clipRow(c, ci, k)).join("")}</div>`).join("")}
     <div class="hl-out"><div class="row gap">
         <label>字幕：<select id="plSubs">
-          <option value="burn" ${subs === "burn" ? "selected" : ""}>燒進畫面（含逐字高亮）</option>
+          <option value="burn" ${subs === "burn" ? "selected" : ""}>燒進畫面（含逐字變色）</option>
           <option value="soft" ${subs === "soft" ? "selected" : ""}>內嵌字幕軌（播放器可開關、可再編輯）</option>
           <option value="none" ${subs === "none" ? "selected" : ""}>不加字幕（另附 SRT）</option></select></label>
         <button id="plRender" class="primary">確認，輸出影片</button></div>

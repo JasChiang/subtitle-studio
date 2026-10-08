@@ -130,6 +130,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
+        if path.is_relative_to(STATIC):  # always revalidate the page code, so an update can't run half-stale
+            self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(end - start + 1))
         if download_name:
             self.send_header("Content-Disposition",

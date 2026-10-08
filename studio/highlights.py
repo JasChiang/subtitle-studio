@@ -244,6 +244,9 @@ def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = F
 def overlay_png(p: Project, kind: str, lines: list[str]) -> Path:
     """One overlay image (sub / card / tag) exactly as the export draws it; cached by content."""
     import hashlib
+    # older pages sent "spoken\x01rest" (prefix style) — convert to "\x01spoken\x02rest"
+    lines = [(HL_ON + l.split(HL_ON, 1)[0] + HL_OFF + l.split(HL_ON, 1)[1]) if HL_ON in l and HL_OFF not in l
+             else l for l in lines]
     W, H = project_size(p)
     key = hashlib.sha1(json.dumps([kind, lines, W, H, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
                        .encode()).hexdigest()[:20]
