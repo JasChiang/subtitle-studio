@@ -620,7 +620,8 @@ $("#hlList").addEventListener("click", (e) => { const d = e.target.closest("[dat
 $("#hlPlanBtn").onclick = () => {
   if (!needIdle()) return;
   startTask("/highlights", { focus: $("#hlFocus").value, seconds: +$("#hlSecs").value || 90,
-    chapters: $("#hlChapters").checked, hook: $("#hlHook").checked, zoom: $("#hlZoom").checked });
+    chapters: $("#hlChapters").checked, hook: $("#hlHook").checked, zoom: $("#hlZoom").checked,
+    review: $("#hlReview").checked });
 };
 async function openPlan(id) {
   S.plan = await api(pidURL() + "/highlights/" + encodeURIComponent(id)).catch(() => null);
@@ -640,7 +641,8 @@ function planDur(pl) {
 // same rule as highlights.spoken_in: a line belongs to a clip only if some of its words are spoken inside it
 function spokenIn(x, a, b) {
   if (!x.words?.length) return x.end > a + 0.3 && x.start < b - 0.3;
-  return x.words.some((w) => (w.s + w.e) / 2 >= a && (w.s + w.e) / 2 <= b);
+  const inside = x.words.filter((w) => (w.s + w.e) / 2 >= a && (w.s + w.e) / 2 <= b).length;
+  return inside * 2 >= x.words.length;  // at least half of the line (same as highlights.spoken_in)
 }
 function clipCues(c) { return S.cues.filter((x) => x.end > c.start && x.start < c.end && spokenIn(x, c.start, c.end)); }
 function tightEdges(c) {  // a cut with no pause on that side would slice into continuous speech
@@ -657,6 +659,7 @@ function clipRow(c, ci, k) {
     <button data-a="play" title="預覽這段">▶</button>
     <input value="${fmt(c.start)}" data-f="start"><input value="${fmt(c.end)}" data-f="end">
     <div class="txt">${clipCues(c).map((x) => `<div class="cl" data-id="${x.id}">
+        <button class="drop" data-a="dropLine" title="從這段拿掉這一句（中間的句子會變成跳剪）">✕</button>
         <div contenteditable="plaintext-only" data-cf="text">${esc(x.text)}</div>
         <div contenteditable="plaintext-only" data-cf="tr" class="tr">${esc(x.tr || "")}</div></div>`).join("")}
       ${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}
@@ -766,6 +769,18 @@ $("#hlEdit").addEventListener("click", async (e) => {
   if (a === "play") {  // move the reel playhead to this clip
     const idx = seqPieces().findIndex((p) => p.ci === ci && p.k === k);
     return enterPreview(Math.max(0, idx), true);
+  }
+  if (a === "dropLine") {  // remove one line: trim at the edges, split into a jump cut in the middle
+    const c = list[k], r = clipLineRange(c);
+    const j = S.cues.findIndex((x) => x.id === +e.target.closest(".cl").dataset.id);
+    if (!r || j < 0) return;
+    const [f, l] = r;
+    if (f === l) list.splice(k, 1);
+    else if (j === f) c.start = cutBefore(f + 1);
+    else if (j === l) c.end = cutAfter(l - 1);
+    else list.splice(k, 1, { ...c, end: cutAfter(j - 1) }, { ...c, start: cutBefore(j + 1), why: "" });
+    if (ci >= 0 && !list.length) S.plan.chapters.splice(ci, 1);
+    planChanged(); return renderPlan();
   }
   if (["extPrev", "cutFirst", "extNext", "cutLast"].includes(a)) {
     const c = list[k], r = clipLineRange(c);

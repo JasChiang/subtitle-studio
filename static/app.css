@@ -168,3 +168,6 @@ td.txt [contenteditable], td.tr [contenteditable], .hl-edit .clip .cl [contented
 .hl-edit .clip-acts { display: flex; flex-wrap: wrap; gap: 3px; justify-content: flex-end; }
 .hl-edit .clip-acts button { padding: 1px 5px; font-size: 11px; }
 .hl-edit .clip .tight { color: var(--warn); font-size: 11px; }
+.hl-edit .clip .cl { position: relative; padding-left: 22px; }
+.hl-edit .clip .cl .drop { position: absolute; left: 0; top: 2px; padding: 0 4px; font-size: 10px; opacity: .35; }
+.hl-edit .clip .cl:hover .drop { opacity: 1; color: var(--warn); }

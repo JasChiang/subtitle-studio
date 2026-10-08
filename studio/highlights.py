@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from . import gemini
-from .pipeline import HL_OFF, HL_ON, ROOT, Project, fmt_mmss, join_tokens, marked_source, ts
+from .pipeline import HL_OFF, HL_ON, ROOT, Project, fmt_mmss, is_cjk_text, join_tokens, marked_source, ts
 
 RENDER_BIN = ROOT / "bin" / "text-render"
 CARD = 1.7     # seconds of blurred background + chapter card at the start of each chapter
@@ -187,6 +187,34 @@ def plan_duration(plan: dict) -> float:
         sum(c["end"] - c["start"] for ch in plan["chapters"] for c in ch["clips"])
 
 
+SENT_FINAL = (".", "?", "!", "。", "？", "！", "…", '."', '?"', '!"', "」")
+
+
+def sentence_units(p: Project, cues: list[dict]) -> list[dict]:
+    """Subtitle lines are often half sentences. Merge them into whole sentences (ending in . ? ! 。 or a long
+    pause) so the planner picks complete thoughts, and tag each with its speaker from the reference."""
+    ref = (p.read("reference.json") or {}).get("lines", [])
+    units, cur = [], []
+    for i, c in enumerate(cues):
+        cur.append(i)
+        txt = c["text"].rstrip()
+        gap = cues[i + 1]["start"] - c["end"] if i + 1 < len(cues) else 9
+        if txt.endswith(SENT_FINAL) or gap > 1.5 or len(cur) >= 6 or c.get("dialog"):
+            units.append(cur)
+            cur = []
+    if cur:
+        units.append(cur)
+    out = []
+    for k, ids in enumerate(units):
+        a, b = ids[0], ids[-1]
+        t0 = cues[a]["start"]
+        spk = next((r["speaker"] for r in reversed(ref) if r["t"] <= t0 + 0.8), "")
+        sep = "" if is_cjk_text(cues[a]["text"]) else " "
+        out.append({"k": k + 1, "a": a, "b": b, "start": t0, "end": cues[b]["end"], "speaker": spk,
+                    "text": sep.join(cues[i]["text"] for i in ids)})
+    return out
+
+
 def plan_highlight(p: Project, req: dict) -> str:
     o = p.options
     cues = cues_of(p)
@@ -194,37 +222,82 @@ def plan_highlight(p: Project, req: dict) -> str:
     focus = (req.get("focus") or "").strip()
     use_chapters = req.get("chapters", True)
     lang = o["target_lang"]
-    system = (
-        "You are a video editor cutting a short highlight reel from a long video, working from its numbered "
-        "transcript (id, start time, text). Pick clips as ranges of consecutive line ids [from, to].\n"
-        f"- Target total length: about {secs} seconds (stay within ±15%). Line times tell you durations.\n"
+    units = sentence_units(p, cues)
+    script = "\n".join(f"{u['k']}\t[{fmt_mmss(u['start'])}, {u['end'] - u['start']:.0f}s]\t{u['speaker']}: {u['text']}"
+                       for u in units)
+    rules = (
+        "- Clips are ranges of consecutive SENTENCE ids [from, to] (each id is one complete sentence; the "
+        "duration in seconds is shown).\n"
+        f"- Target total length: about {secs} seconds (stay within ±15%).\n"
         f"- Content: {focus if focus else 'the most interesting, insightful and quotable moments of the video'}."
         " Only choose material that really matches this request.\n"
-        "- Every clip must make sense on its own: start at the beginning of a thought, end at a natural end. "
-        "Cut filler and digressions; joining non-adjacent clips (jump cuts) is fine.\n"
+        "- EVERY clip must be a complete thought a viewer understands without the rest of the video: include "
+        "the sentences that finish an explanation or argument; never end on a setup that is answered later, on "
+        "a dangling 'because…', or on the OTHER speaker starting a question. A question from the interviewer "
+        "is only kept together with its answer. Prefer fewer, complete clips over many fragments; cutting "
+        "filler and digressions out of the middle (jump cuts) is fine as long as the meaning still closes.\n"
         + ("- Group clips into 2–6 chapters, each with a short punchy title in "
            f"{lang} ({o['translate_style']}; max ~14 characters) and a short English title. Clips inside a "
            "chapter usually stay in chronological order.\n" if use_chapters else
            "- Return exactly ONE chapter with an empty title containing all clips.\n")
-        + ("- `hook`: 1–2 lines (under ~8 seconds) — the most intriguing line, played before everything else; "
-           "it may come from anywhere in the video.\n" if req.get("hook", True) else "- `hook`: empty.\n")
+        + ("- `hook`: one short, intriguing complete sentence (under ~8 seconds) played before everything else; "
+           "avoid repeating it at the start of a chapter right after.\n" if req.get("hook", True)
+           else "- `hook`: empty.\n")
         + "- `title`: a title for the reel in " + lang + "."
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
-    p.log(f"精華企劃：{secs} 秒｜{focus or '（由 AI 挑選最精彩的段落）'}")
-    data, served = gemini.generate_json(o["text_model"], [{"text": transcript_lines(cues, with_tr=True)}],
-                                        system=system, schema=PLAN_SCHEMA, usage=p.usage, log=p.log,
-                                        max_tokens=32768)
-    idx = {c["id"]: i for i, c in enumerate(cues)}
+    system = ("You are a senior video editor cutting a short highlight reel from a long interview, working "
+              "from its transcript split into numbered sentences with speakers.\n" + rules)
+    p.log(f"精華企劃：{secs} 秒｜{focus or '（由 AI 挑選最精彩的段落）'}｜{len(units)} 個句子")
+    data, served = gemini.generate_json(o["text_model"], [{"text": script}], system=system, schema=PLAN_SCHEMA,
+                                        usage=p.usage, log=p.log, max_tokens=32768)
+    by_k = {u["k"]: u for u in units}
+
+    def dur(d):
+        tot = 0.0
+        for r in (d.get("hook") or []) + [x for ch in d.get("chapters", []) for x in ch.get("clips", [])]:
+            ua, ub = by_k.get(r.get("from")), by_k.get(r.get("to"))
+            if ua and ub:
+                tot += max(0.0, ub["end"] - ua["start"])
+        return tot
+
+    if req.get("review", True):  # second pass: read the cut as a script, fix clips that don't close
+        cut = []
+        for name, rs in [("HOOK", data.get("hook") or [])] + [(f"CHAPTER {ch.get('title', '')}", ch.get("clips", []))
+                                                              for ch in data.get("chapters", [])]:
+            cut.append(f"## {name}")
+            for r in rs:
+                ua, ub = by_k.get(r.get("from")), by_k.get(r.get("to"))
+                if ua and ub:
+                    cut.append(f"[{ua['k']}–{ub['k']}] " + " ".join(by_k[k]["text"] for k in range(ua["k"], ub["k"] + 1)
+                                                                    if k in by_k))
+        review_sys = ("You are the senior editor reviewing a highlight-reel cut before it is approved.\n" + rules +
+                      "\nRead the CURRENT CUT as a viewer would. For every clip check: does it start where a thought "
+                      "starts, does every explanation actually finish, does anything end mid-thought or on the other "
+                      "speaker starting a question, does the reel flow? Fix problems by extending / trimming clips "
+                      "by whole sentences, splitting out a stray sentence, or dropping a clip. Keep what already "
+                      "works. Return the full corrected plan in the same format (sentence ids).")
+        prompt = f"CURRENT CUT ({dur(data):.0f}s):\n" + "\n".join(cut) + "\n\nFULL TRANSCRIPT:\n" + script
+        try:
+            fixed, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=review_sys,
+                                            schema=PLAN_SCHEMA, usage=p.usage, log=p.log, max_tokens=32768)
+            if fixed.get("chapters"):
+                p.log(f"  剪輯複查：{dur(data):.0f} 秒 → {dur(fixed):.0f} 秒")
+                data = fixed
+        except Exception as e:
+            p.log(f"  剪輯複查失敗，沿用初稿：{e}")
+
     cuts = cut_points(p, cues)
 
     def clips(raw):
         out = []
         for r in raw:
-            a, b = idx.get(r.get("from")), idx.get(r.get("to"))
-            if a is None or b is None:
+            ua, ub = by_k.get(r.get("from")), by_k.get(r.get("to"))
+            if not ua or not ub:
                 continue
-            a, b = min(a, b), max(a, b)
+            if ua["k"] > ub["k"]:
+                ua, ub = ub, ua
+            a, b = ua["a"], ub["b"]
             s, e = clip_bounds(cues, a, b, cuts)
             out.append({"start": s, "end": e, "from": cues[a]["id"], "to": cues[b]["id"], "why": r.get("why", "")})
         return out
@@ -264,7 +337,8 @@ def spoken_in(c: dict, a: float, b: float) -> bool:
     ws = c.get("words") or []
     if not ws:
         return c["end"] > a + 0.3 and c["start"] < b - 0.3
-    return any(a <= (w["s"] + w["e"]) / 2 <= b for w in ws)
+    inside = sum(1 for w in ws if a <= (w["s"] + w["e"]) / 2 <= b)
+    return inside * 2 >= len(ws)  # at least half of the line — one bled-in word doesn't pull the line in
 
 
 def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = False
