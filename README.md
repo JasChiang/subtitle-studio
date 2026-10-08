@@ -1,5 +1,17 @@
 # Subtitle Studio
 
+![Subtitle Studio 字幕編輯畫面：日文影片翻成繁體中文](docs/screenshot.jpg)
+
+**English** — A local, browser-based subtitle workstation for macOS. Apple's on-device speech recognition gives every
+word a timestamp; Google Gemini watches the video to write an independent reference transcript, corrects the
+recognition errors, splits lines the way a subtitler would and translates them. Edit subtitles against the picture,
+export SRT / VTT or the whole video with subtitles (soft track or burned in), get a summary, and cut highlight reels
+by describing what you want — previewed live, non-destructively, before anything is rendered. Tested with English,
+Chinese, Japanese, Korean and Spanish. Requires an Apple Silicon Mac on macOS 26+, ffmpeg and your own Gemini API
+key. The interface is in Traditional Chinese.
+
+---
+
 本機 web GUI 字幕工作台：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，並能在瀏覽器裡對著影片逐條修字幕、匯出 SRT／VTT；字幕完成後還能產生**影片摘要**，以及依你指定的主題**剪出精華短片**（章節字卡、跳剪、雙語字幕）。
 
 兩個設計原則：
@@ -7,13 +19,35 @@
 - **時間碼只來自 Apple。** `SpeechTranscriber` 給每個字的時間範圍，Gemini 只改文字、不碰時間。
 - **參考稿要獨立。** Gemini 看影片聽寫時看不到 ASR 文字，這樣兩邊不會互相帶偏，同音字、專有名詞的錯誤才抓得出來。
 
+## 多語言
+
+Apple 語音辨識支援的語言都能用（英、中〔台灣／中國／香港／粵語〕、日、韓、西、法、德、義、葡與多種印度語言；完整清單見 `bin/apple-asr --list-locales`），翻譯目標語言不限。
+
+用 macOS 語音合成產生的測試片（`tests/make_multilingual_clips.py`，內容是自己寫的稿子）實測：
+
+| 測試片 | 翻譯成 | Apple 辨識錯誤率 | Gemini 校正後 |
+|---|---|---|---|
+| 繁體中文（兩人對話） | 英文 | 25.6% | 3.7% |
+| 日文 | 繁體中文 | 0% | 0% |
+| 韓文 | 繁體中文 | 14.6% | 0% |
+| 西班牙文 | 繁體中文 | 6.0% | 0% |
+| 中英夾雜 | 英文 | 64.9% | 15.8% |
+
+![多語言字幕：英／中、中／日、中／韓、中／西，字型依語言自動切換](docs/multilingual.jpg)
+
+- 字型依每一行的文字自動選：日文用冬青黑體（Hiragino），韓文用 Apple SD Gothic Neo，中文依專案語言用蘋方繁／簡／港。
+- 韓文保留詞間空格；中文、日文不加多餘空格。
+- 「中英數之間加半形空格」只套用在中文。
+- 翻譯風格留空時依目標語言自動決定（繁體中文用台灣用語）。
+- **中英夾雜是弱點**：Apple 一次只能用一種語言辨識，英文詞會被聽成怪字，要靠 Gemini 修回；專有名詞（例如產品名）請放進詞彙表，否則可能被改錯。
+
 ## 需求
 
 - Apple Silicon Mac，**macOS 26+**（`SpeechTranscriber` / `SpeechAnalyzer`）
 - Swift toolchain（Xcode 或 Command Line Tools 皆可，只用 Speech／AVFoundation，不需 SwiftUI）
 - `ffmpeg`／`ffprobe`（`brew install ffmpeg`）
 - Python 3.10+（只用標準函式庫，免裝套件）
-- Gemini API key（[Google AI Studio](https://aistudio.google.com/apikey)）
+- Gemini API key（[Google AI Studio](https://aistudio.google.com/apikey)）。**費用由你的 Gemini 帳號支付，建議先在 [AI Studio](https://aistudio.google.com/spend) 設好每月花費上限。**
 
 ## 安裝與啟動
 
@@ -47,7 +81,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | **reference** | 依「每段分鐘數」切成 360p／2 fps 的代理檔，用 File API 上傳；Gemini 逐字聽寫，並標出講者與專有名詞（3 段並行） | `reference/chunk_*.json`, `reference.json` |
 | **correct** | 把 ASR 段落和同時段的參考稿一起交給 Gemini（純文字）校正；段落中途換講者時標 `\|\|` | `corrected.json` |
 | **cues** | 以 60 段為一個視窗，用 difflib 把校正後的文字對回 ASR 字級時間；再把影片片段和編號字詞交給 Gemini，由它看畫面、聽聲音決定每行字幕的斷點（語意斷句） | `cues.json` |
-| **translate** | 每 60 條一批，帶前後文翻譯（預設台灣繁中） | `cues.json` 的 `tr` |
+| **translate** | 以完整句子為單位交給 Gemini（JSON 格式），先翻整句再分配回每一條；每條附原文開頭供對位檢查，對不上就自動重翻 | `cues.json` 的 `tr` |
 
 每步都有快取，可以單獨重跑；勾選「強制重算」會忽略快取。
 
@@ -109,11 +143,23 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | `drop_fillers` | true | 移除 um／uh／嗯／呃 |
 | `semantic_breaks` / `seg_thinking` | true / low | 語意斷句開關與 Gemini 思考程度（low／medium／high） |
 | `max_chars` / `max_duration` / `gap_break` | 0（自動）/ 6.5 / 0.7 | 一行好讀的長度參考，以及規則斷句的參數 |
-| `target_lang` / `translate_style` | 繁體中文（台灣） | 翻譯目標語言與風格 |
+| `target_lang` / `translate_style` | 繁體中文（台灣）／（自動） | 翻譯目標語言；風格留空時依目標語言自動決定 |
+| `karaoke` / `sub_order` | false / 譯文在上 | 逐字變色、雙語上下順序（預覽與輸出共用） |
+| `correct_with_audio` / `energy_snap` / `backchannels` | true / true / 省略 | 校正時聽音訊、依音量校正字的邊界、附和（mm-hmm）怎麼處理 |
 
 ## 花費參考
 
 以一部 58 分鐘的英文訪談實測：Gemini Flash 跑完整流程約 US$1、約 10 分鐘（ASR 1 分鐘、參考稿 3 分鐘、校正 2.5 分鐘、語意斷句 2 分鐘、翻譯 2 分鐘）。實際花費依模型價格與影片內容而定。GUI 右上角會顯示估算花費。
+
+## 測試
+
+```bash
+python3 -m unittest discover -s tests -t . -v
+```
+
+- **單元測試**（純 Python、免網路）：多語言斷詞與排版、對齊、顯示時間、逐字變色、精華剪點、翻譯對位檢查等。GitHub Actions 每次 push 自動執行。
+- **Mac 端到端測試**：用 macOS 語音合成念一段已知稿子 → Apple 語音辨識 → 對齊 → 斷句 → 匯出，不需要網路與 Gemini；在非 Mac 環境會自動略過。
+- **多語言測試片**：`python3 tests/make_multilingual_clips.py` 會在 `uploads/testclips/` 產生 5 支測試影片和對照用的稿子（`manifest.json`），可以拿來跑完整流程。
 
 ## 專案結構
 
@@ -126,6 +172,7 @@ studio/gemini.py      Gemini REST（File API 上傳、JSON schema 輸出、遇�
 studio/server.py      標準函式庫 HTTP server（API、支援 Range 的影片串流、背景執行）
 studio/cli.py         無介面執行
 static/               單頁前端（原生 JS）
+tests/                單元測試、Mac 端到端測試、多語言測試片產生器
 ```
 
 ## 已知限制
@@ -133,3 +180,11 @@ static/               單頁前端（原生 JS）
 - Gemini 偶爾不完全遵守「逐字」規則（例如把 gonna 改成 going to），或聽錯少數字；建議用「只看校正有改的」快速檢查一遍。
 - 參考稿的講者標籤是每段各自判斷的，偶爾會不一致，只影響換講者時的斷句。
 - 伺服器只綁 `127.0.0.1`，不做身分驗證，請不要對外開放。
+- 只能在 Apple Silicon Mac、macOS 26 以上使用（依賴 Apple 裝置端語音辨識）；介面只有中文。
+- 字幕交付規範還沒完整實作：譯文長度與換行、閱讀速度（每秒字數）、對齊影格、鏡頭切換偵測。
+- 由右往左的語言（阿拉伯文、烏爾都文）沒有特別處理，雙人字幕的破折號位置可能不對。
+- 精華影片沒有響度標準化，也還沒有直式（9:16）輸出與 FCPXML／EDL 匯出。
+
+## 授權
+
+[MIT](LICENSE)
