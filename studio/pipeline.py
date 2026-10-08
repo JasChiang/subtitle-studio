@@ -1008,9 +1008,36 @@ def stage_cues(p: Project):
 TR_SCHEMA = {
     "type": "object",
     "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
-        "id": {"type": "integer"}, "tr": {"type": "string"}}, "required": ["id", "tr"]}}},
+        "id": {"type": "integer"},
+        "echo": {"type": "string", "description": "the first 3 words (or first 4 characters) of THIS cue's source"},
+        "tr": {"type": "string"}}, "required": ["id", "echo", "tr"]}}},
     "required": ["items"],
 }
+TR_END = (".", "?", "!", "。", "？", "！", "…", '."', '?"', '!"', "」")
+
+
+def sentence_groups(cues: list[dict], idxs: list[int]) -> list[list[int]]:
+    """Consecutive cue indices that together form one sentence (cues are often half sentences)."""
+    groups, cur = [], []
+    for n, i in enumerate(idxs):
+        cur.append(i)
+        nxt = idxs[n + 1] if n + 1 < len(idxs) else None
+        gap = cues[nxt]["start"] - cues[i]["end"] if nxt is not None else 9
+        if cues[i]["text"].rstrip().endswith(TR_END) or cues[i].get("dialog") or gap > 1.5 or len(cur) >= 6 \
+                or nxt is None or nxt != i + 1:
+            groups.append(cur)
+            cur = []
+    return groups
+
+
+def echo_ok(echo: str, text: str) -> bool:
+    """Did the model answer for THIS cue? Its echo must match the start of the cue's source."""
+    e = norm(echo)
+    src = norm(text.replace("- ", " "))
+    if not e:
+        return False
+    k = min(len(e), 10)
+    return src.startswith(e[:k]) or e[:k] in src[:k + 6]
 
 
 def stage_translate(p: Project, only_missing: bool = False):
@@ -1021,38 +1048,85 @@ def stage_translate(p: Project, only_missing: bool = False):
     glossary = o["glossary"].strip()
     system = (
         f"You translate subtitles into {o['target_lang']}. Style: {o['translate_style']}.\n"
-        "Each cue is one fragment of continuous speech. Translate EACH cue so its translation covers that "
-        "cue's own content (do not move content into neighbouring cues), while the sequence reads naturally. "
-        "Keep it concise for on-screen reading; no trailing full stop on a cue unless it is a question or "
-        "exclamation. A cue written as two lines starting with '- ' is two people speaking at once: translate "
-        "it as '－第一人的話　－第二人的話' on ONE line (full-width dash, each part translated). Return every id."
+        "Cues come grouped by SENTENCE. For each sentence: first understand / translate the whole sentence, then "
+        "split your translation across that sentence's cues so each cue's translation says what is spoken IN "
+        "THAT CUE. If the target language needs a different word order, restructure the translation so every "
+        "part still matches its own cue — never put one cue's meaning into a neighbouring cue, and never swap "
+        "content between cues. Keep it concise for on-screen reading; no trailing full stop on a cue unless it "
+        "is a question or exclamation. A cue whose text has two lines starting with '- ' is two people speaking "
+        "at once: translate it as '－第一人的話　－第二人的話' on ONE line. For every cue also return `echo` = the "
+        "first 3 words (or first 4 characters) of that cue's own source text, copied exactly — it is used to "
+        "check that each translation is attached to the right cue. Return every id."
         + (f"\nGlossary / names: {glossary}" if glossary else "")
         + (f"\nSpeakers: {json.dumps(ref.get('speakers', {}), ensure_ascii=False)}" if ref.get("speakers") else "")
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
     todo = [i for i, c in enumerate(cues) if not (only_missing and c.get("tr"))]
-    batches = [todo[i:i + 60] for i in range(0, len(todo), 60)]
-    done = [0]
     import threading
     lock = threading.Lock()
+    stats = {"retried": 0, "rejected": 0}
 
-    def one(batch):
+    def make_batches(idxs, size):
+        out, cur = [], []
+        for g in sentence_groups(cues, idxs):
+            if cur and len(cur) + len(g) > size:
+                out.append(cur)
+                cur = []
+            cur += g
+        if cur:
+            out.append(cur)
+        return out
+
+    def translate(batch) -> dict[int, str]:
+        """Translate one batch; returns {cue index: translation} for answers that pass the echo check."""
         ctx_before = cues[max(0, batch[0] - 4):batch[0]]
         ctx_after = cues[batch[-1] + 1:batch[-1] + 3]
-        prompt = ("Context before (do not translate): " + " / ".join(c["text"] for c in ctx_before) + "\n"
-                  "Context after (do not translate): " + " / ".join(c["text"] for c in ctx_after) + "\n\n"
-                  "CUES:\n" + "\n".join(f"{cues[i]['id']}\t{cues[i]['text']}" for i in batch))
-        data, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system, schema=TR_SCHEMA,
-                                       usage=p.usage, log=p.log, max_tokens=32768, thinking="low")
-        got = {it["id"]: it["tr"].strip() for it in data.get("items", [])}
+        payload = {
+            "context_before (do not translate)": [c["text"] for c in ctx_before],
+            "sentences": [[{"id": cues[i]["id"], "text": cues[i]["text"]} for i in g]
+                          for g in sentence_groups(cues, batch)],
+            "context_after (do not translate)": [c["text"] for c in ctx_after],
+        }
+        prompt = json.dumps(payload, ensure_ascii=False, indent=1)  # JSON: a line break in a cue can't shift ids
+        by_id = {cues[i]["id"]: i for i in batch}
+        good: dict[int, str] = {}
+        for attempt in range(3):
+            data, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system, schema=TR_SCHEMA,
+                                           usage=p.usage, log=p.log, max_tokens=32768, thinking="low")
+            bad = 0
+            for it in data.get("items", []):
+                i = by_id.get(it.get("id"))
+                if i is None or not it.get("tr", "").strip():
+                    continue
+                if echo_ok(it.get("echo", ""), cues[i]["text"]):
+                    good.setdefault(i, it["tr"].strip())
+                else:
+                    bad += 1
+            if bad == 0 and len(good) == len(batch):
+                break
+            with lock:
+                stats["retried"] += 1
+            p.log(f"  翻譯對位檢查：{bad} 條對不上、{len(batch) - len(good)} 條缺，重譯這批（第 {attempt + 2} 次）")
+        return good
+
+    def one(batch):
+        good = translate(batch)
+        missing = [i for i in batch if i not in good]
+        if missing:  # still unverified → smaller batches give the model less to keep in step
+            for small in make_batches(missing, 8):
+                good.update(translate(small))
         with lock:
             for i in batch:
-                if cues[i]["id"] in got:
-                    cues[i]["tr"] = got[cues[i]["id"]]
+                if i in good:
+                    cues[i]["tr"] = good[i]
+                else:
+                    stats["rejected"] += 1
             p.write("cues.json", doc)
             done[0] += 1
             p.status(progress=done[0] / len(batches))
 
+    batches = make_batches(todo, 50)
+    done = [0]
     with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
         list(ex.map(one, batches))
     fixed = apply_cjk_spacing(cues, o.get("cjk_spacing", True))
@@ -1060,7 +1134,8 @@ def stage_translate(p: Project, only_missing: bool = False):
         p.write("cues.json", doc)
         p.log(f"  中英數之間補半形空格：{fixed} 條")
     missing = sum(1 for c in cues if not c.get("tr"))
-    p.log(f"翻譯完成，{len(cues) - missing}/{len(cues)} 條" + (f"（{missing} 條缺譯，可再跑一次）" if missing else ""))
+    p.log(f"翻譯完成，{len(cues) - missing}/{len(cues)} 條（對位重譯 {stats['retried']} 次）"
+          + (f"（{missing} 條缺譯，可按「補翻缺少的譯文」）" if missing else ""))
 
 
 STAGE_FN = {"asr": stage_asr, "reference": stage_reference, "correct": stage_correct, "cues": stage_cues,
