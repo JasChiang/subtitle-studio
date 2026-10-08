@@ -230,7 +230,12 @@ class Handler(BaseHTTPRequestHandler):
                 m["log"] = log
                 return self.send_json(m)
             if sub == "cues":
-                return self.send_json(p.read("cues.json") or {"cues": []})
+                doc = p.read("cues.json") or {"cues": []}
+                if doc.get("cues"):  # attach the quiet cut points the plan editor snaps clips to
+                    cin, cout = highlights.cut_points(p, doc["cues"])
+                    for c, a, b in zip(doc["cues"], cin, cout):
+                        c["cin"], c["cout"] = a, b
+                return self.send_json(doc)
             if sub == "reference":
                 return self.send_json(p.read("reference.json") or {})
             if sub == "media":

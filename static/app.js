@@ -643,15 +643,28 @@ function spokenIn(x, a, b) {
   return x.words.some((w) => (w.s + w.e) / 2 >= a && (w.s + w.e) / 2 <= b);
 }
 function clipCues(c) { return S.cues.filter((x) => x.end > c.start && x.start < c.end && spokenIn(x, c.start, c.end)); }
+function tightEdges(c) {  // a cut with no pause on that side would slice into continuous speech
+  const r = clipLineRange(c);
+  if (!r) return [];
+  const out = [];
+  if (r[0] > 0 && c.start - wE(S.cues[r[0] - 1]) < 0.03) out.push("開頭");
+  if (r[1] + 1 < S.cues.length && wS(S.cues[r[1] + 1]) - c.end < 0.03) out.push("結尾");
+  return out;
+}
 function clipRow(c, ci, k) {
+  const tight = tightEdges(c);
   return `<div class="clip" data-ci="${ci}" data-k="${k}">
     <button data-a="play" title="預覽這段">▶</button>
     <input value="${fmt(c.start)}" data-f="start"><input value="${fmt(c.end)}" data-f="end">
     <div class="txt">${clipCues(c).map((x) => `<div class="cl" data-id="${x.id}">
         <div contenteditable="plaintext-only" data-cf="text">${esc(x.text)}</div>
         <div contenteditable="plaintext-only" data-cf="tr" class="tr">${esc(x.tr || "")}</div></div>`).join("")}
-      ${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}</div>
-    <div><button data-a="up" title="上移">↑</button><button data-a="down" title="下移">↓</button><button data-a="del" title="刪除">✕</button></div></div>`;
+      ${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}
+      ${tight.length ? `<div class="tight" title="講者在這裡沒有停頓，剪在這裡會切到連續的語音；可用＋／－前一句、後一句調整">⚠ ${tight.join("、")}接點沒有停頓</div>` : ""}</div>
+    <div class="clip-acts">
+      <button data-a="extPrev" title="往前多加一句">＋前一句</button><button data-a="cutFirst" title="去掉開頭那一句">－前一句</button>
+      <button data-a="extNext" title="往後多加一句">＋後一句</button><button data-a="cutLast" title="去掉結尾那一句">－後一句</button>
+      <button data-a="up" title="上移">↑</button><button data-a="down" title="下移">↓</button><button data-a="del" title="刪除這段">✕</button></div></div>`;
 }
 function renderPlan() {
   const pl = S.plan, box = $("#hlEdit");
@@ -666,6 +679,7 @@ function renderPlan() {
     ${pl.chapters.map((ch, ci) => `<div class="chap"><div class="chap-head">
         <input data-ci="${ci}" data-f="title" value="${esc(ch.title)}" placeholder="章節標題">
         <input data-ci="${ci}" data-f="title_en" value="${esc(ch.title_en || "")}" placeholder="English title">
+        <button data-ci="${ci}" data-a="addHere" title="先在字幕分頁或播放器找到想要的那一句，再按這裡加進這一章">＋ 在播放點加一段</button>
         <button data-ci="${ci}" data-a="delch" title="刪除整章">✕ 章</button></div>
         ${ch.clips.map((c, k) => clipRow(c, ci, k)).join("")}</div>`).join("")}
     <div class="hl-out"><div class="row gap">
@@ -678,6 +692,27 @@ function renderPlan() {
         <a class="btn" href="${pidURL()}/highlights/${pl.id}/video?ts=${r.at}" target="_blank">開啟</a>
         <a class="btn" href="${pidURL()}/highlights/${pl.id}/download">下載 MP4</a>
         <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載 SRT</a></p>` : ""}</div>`;
+}
+// cut points between lines — the quietest moment of each pause (server: highlights.cut_points)
+const wS = (c) => c.words?.length ? c.words[0].s : c.start;
+const wE = (c) => c.words?.length ? c.words.at(-1).e : c.end;
+function cutBefore(i) {  // quiet cut point computed by the server (highlights.cut_points)
+  const c = S.cues[i];
+  return c.cin ?? +(wS(c) - 0.05).toFixed(3);
+}
+function cutAfter(i) {
+  const c = S.cues[i];
+  return c.cout ?? +(wE(c) + 0.1).toFixed(3);
+}
+function clipLineRange(c) {  // indices of the first / last line spoken inside a clip
+  const idx = S.cues.map((x, i) => [x, i]).filter(([x]) => x.end > c.start && x.start < c.end && spokenIn(x, c.start, c.end)).map(([, i]) => i);
+  return idx.length ? [idx[0], idx.at(-1)] : null;
+}
+function lineAt(t) {  // the line at (or right after) a source time
+  const i = findCue(t);
+  if (i >= 0) return i;
+  const k = S.cues.findIndex((x) => x.start >= t);
+  return k >= 0 ? k : S.cues.length - 1;
 }
 const clipsOf = (ci) => ci < 0 ? S.plan.hook : S.plan.chapters[ci].clips;
 function planChanged() {
@@ -716,12 +751,31 @@ $("#hlEdit").addEventListener("click", async (e) => {
     return startTask(`/highlights/${S.plan.id}/render`, {});
   }
   if (a === "delch") { S.plan.chapters.splice(+e.target.dataset.ci, 1); planChanged(); return renderPlan(); }
+  if (a === "addHere") {
+    const ci = +e.target.dataset.ci, t = video.currentTime, i = lineAt(t);
+    if (i < 0) return;
+    const c = { start: cutBefore(i), end: cutAfter(i), from: S.cues[i].id, to: S.cues[i].id, why: "手動加入" };
+    const list = S.plan.chapters[ci].clips;
+    const at = list.findIndex((x) => x.start > c.start);  // keep the chapter in source order
+    list.splice(at < 0 ? list.length : at, 0, c);
+    planChanged(); return renderPlan();
+  }
   const row = e.target.closest(".clip");
   if (!row || !a) return;
   const ci = +row.dataset.ci, k = +row.dataset.k, list = clipsOf(ci);
   if (a === "play") {  // move the reel playhead to this clip
     const idx = seqPieces().findIndex((p) => p.ci === ci && p.k === k);
     return enterPreview(Math.max(0, idx), true);
+  }
+  if (["extPrev", "cutFirst", "extNext", "cutLast"].includes(a)) {
+    const c = list[k], r = clipLineRange(c);
+    if (!r) return;
+    const [f, l] = r;
+    if (a === "extPrev" && f > 0) c.start = cutBefore(f - 1);
+    if (a === "cutFirst" && l > f) c.start = cutBefore(f + 1);
+    if (a === "extNext" && l + 1 < S.cues.length) c.end = cutAfter(l + 1);
+    if (a === "cutLast" && l > f) c.end = cutAfter(l - 1);
+    planChanged(); return renderPlan();
   }
   if (a === "del") list.splice(k, 1);
   if (a === "up" && k > 0) [list[k - 1], list[k]] = [list[k], list[k - 1]];
@@ -782,6 +836,10 @@ function seqGo(i, within) {
   const q = S.seq, pc = q.pieces[i];
   q.i = i;
   q.ended = false;
+  if (!video.muted) {  // silence the jump; unmute once the new position is ready
+    video.muted = true;
+    video.addEventListener("seeked", () => { video.muted = false; }, { once: true });
+  }
   video.currentTime = pc.start + within;
   $("#rbLabel").textContent = `${i + 1}/${q.pieces.length}｜${pc.ci < 0 ? "開頭 hook" : pc.title || ""}`;
   $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
@@ -800,7 +858,7 @@ function seqTick(t) {
   if (!S.scrubbing) $("#rbRange").value = rt;
   $("#rbTime").textContent = `${fmt(rt).slice(0, -2)} / ${fmt(total).slice(0, -2)}`;
   $("#rbPlay").textContent = video.paused ? "▶" : "❚❚";
-  if (!video.paused && !video.seeking && t >= q.pieces[q.i].end - 0.03) seqNext();
+  if (!video.paused && !video.seeking && t >= q.pieces[q.i].end - 0.06) seqNext();
 }
 function reelSeek(rt) {
   const q = S.seq;

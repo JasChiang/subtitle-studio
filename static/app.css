@@ -164,3 +164,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 #rbLabel { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td.n .est { margin-left: 2px; cursor: help; }
 td.txt [contenteditable], td.tr [contenteditable], .hl-edit .clip .cl [contenteditable] { white-space: pre-wrap; }
+.hl-edit .clip { grid-template-columns: 22px 92px 92px 1fr 170px; }
+.hl-edit .clip-acts { display: flex; flex-wrap: wrap; gap: 3px; justify-content: flex-end; }
+.hl-edit .clip-acts button { padding: 1px 5px; font-size: 11px; }
+.hl-edit .clip .tight { color: var(--warn); font-size: 11px; }

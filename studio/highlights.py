@@ -119,14 +119,67 @@ PLAN_SCHEMA = {
 }
 
 
-def clip_bounds(cues: list[dict], a: int, b: int) -> tuple[float, float]:
-    """Cue-index range → (start, end) snapped into the silence around the first / last word."""
-    first, last = cues[a], cues[b]
-    s = first["words"][0]["s"] if first.get("words") else first["start"]
-    e = last["words"][-1]["e"] if last.get("words") else last["end"]
-    prev_e = cues[a - 1]["words"][-1]["e"] if a > 0 and cues[a - 1].get("words") else s - 0.3
-    next_s = cues[b + 1]["words"][0]["s"] if b + 1 < len(cues) and cues[b + 1].get("words") else e + 0.3
-    return round(max(prev_e + 0.02, s - 0.12), 3), round(min(next_s - 0.02, e + 0.18), 3)
+def cut_points(p: Project, cues: list[dict]) -> tuple[list[float], list[float]]:
+    """For every line: where a clip should start before it (cin) and end after it (cout). The cut goes at the
+    QUIETEST moment of the pause between this line's words and the neighbouring line's (10 ms loudness), never
+    more than 0.12 s before / 0.18 s after the words — so a tight join can't leak the next word's onset."""
+    from .pipeline import load_energy
+    try:
+        db = load_energy(p)
+    except Exception:
+        db = None
+
+    def valley(lo: float, hi: float) -> float:
+        if hi - lo < 0.02 or not db:
+            return (lo + hi) / 2
+        a, b = int(lo * 100), min(int(hi * 100), len(db) - 1)
+        if b <= a:
+            return (lo + hi) / 2
+        mid = (a + b) / 2
+        k = min(range(a, b + 1), key=lambda k: (round(db[k], 1), abs(k - mid)))
+        return k / 100
+
+    ws = lambda c: c["words"][0]["s"] if c.get("words") else c["start"]
+    we = lambda c: c["words"][-1]["e"] if c.get("words") else c["end"]
+    cin, cout = [], []
+    for i, c in enumerate(cues):
+        s, e = ws(c), we(c)
+        pe = we(cues[i - 1]) if i > 0 else s - 0.3
+        ns = ws(cues[i + 1]) if i + 1 < len(cues) else e + 0.3
+        cin.append(round(max(min(valley(min(pe, s), s), s - 0.01), s - 0.12, 0.0), 3))
+        cout.append(round(min(max(valley(e, max(ns, e)), e + 0.01), e + 0.18), 3))
+    return cin, cout
+
+
+def clip_bounds(cues: list[dict], a: int, b: int, cuts=None) -> tuple[float, float]:
+    """Line-index range → (start, end) at the quiet points around its first / last line."""
+    if cuts:
+        return cuts[0][a], cuts[1][b]
+    s = cues[a]["words"][0]["s"] if cues[a].get("words") else cues[a]["start"]
+    e = cues[b]["words"][-1]["e"] if cues[b].get("words") else cues[b]["end"]
+    return round(s - 0.05, 3), round(e + 0.1, 3)
+
+
+def line_range(cues: list[dict], c: dict):
+    idx = [i for i, x in enumerate(cues) if x["end"] > c["start"] and x["start"] < c["end"]
+           and spoken_in(x, c["start"], c["end"])]
+    return (idx[0], idx[-1]) if idx else None
+
+
+def resnap_plan(plan: dict, cues: list[dict], cuts, tol: float = 0.3) -> int:
+    """Move clip edges that sit near a line boundary onto that boundary's quiet cut point. Edges a person
+    deliberately placed mid-line (further than `tol` away) are left alone. Returns how many edges moved."""
+    moved = 0
+    for c in plan.get("hook", []) + [x for ch in plan["chapters"] for x in ch["clips"]]:
+        r = line_range(cues, c)
+        if not r:
+            continue
+        ns, ne = cuts[0][r[0]], cuts[1][r[1]]
+        if abs(ns - c["start"]) <= tol and abs(ns - c["start"]) > 0.005:
+            c["start"], moved = ns, moved + 1
+        if abs(ne - c["end"]) <= tol and abs(ne - c["end"]) > 0.005:
+            c["end"], moved = ne, moved + 1
+    return moved
 
 
 def plan_duration(plan: dict) -> float:
@@ -163,6 +216,7 @@ def plan_highlight(p: Project, req: dict) -> str:
                                         system=system, schema=PLAN_SCHEMA, usage=p.usage, log=p.log,
                                         max_tokens=32768)
     idx = {c["id"]: i for i, c in enumerate(cues)}
+    cuts = cut_points(p, cues)
 
     def clips(raw):
         out = []
@@ -171,7 +225,7 @@ def plan_highlight(p: Project, req: dict) -> str:
             if a is None or b is None:
                 continue
             a, b = min(a, b), max(a, b)
-            s, e = clip_bounds(cues, a, b)
+            s, e = clip_bounds(cues, a, b, cuts)
             out.append({"start": s, "end": e, "from": cues[a]["id"], "to": cues[b]["id"], "why": r.get("why", "")})
         return out
 
@@ -439,6 +493,11 @@ def save_plan(p: Project, hid: str, plan: dict):
         raise ValueError("bad id")
     old = p.read(f"highlights/{hid}.json") or {}
     plan = {**old, **plan, "id": hid}
+    try:
+        cues = cues_of(p)
+        resnap_plan(plan, cues, cut_points(p, cues))
+    except Exception:
+        pass
     plan["duration"] = round(plan_duration(plan), 2)
     plan.pop("rendered", None)  # edited → the old render no longer matches
     p.write(f"highlights/{hid}.json", plan)
