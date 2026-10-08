@@ -204,6 +204,15 @@ def timeline(plan: dict):
     return pieces
 
 
+def spoken_in(c: dict, a: float, b: float) -> bool:
+    """A line belongs in a clip only if some of its words are actually SPOKEN inside it — its lead-in / hold
+    (display padding) overlapping the clip edge must not flash it on screen."""
+    ws = c.get("words") or []
+    if not ws:
+        return c["end"] > a + 0.3 and c["start"] < b - 0.3
+    return any(a <= (w["s"] + w["e"]) / 2 <= b for w in ws)
+
+
 def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = False
               ) -> list[tuple[float, float, list[str]]]:
     """Subtitle events on the reel timeline. With karaoke, a cue is split at every word start and the spoken
@@ -224,6 +233,8 @@ def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = F
 
     for pa, pb, *_ in pieces:
         for c in cues:
+            if not spoken_in(c, pa, pb):
+                continue
             s, e = max(c["start"], pa), min(c["end"], pb)
             if e - s <= 0.12:
                 continue

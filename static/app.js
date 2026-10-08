@@ -451,7 +451,9 @@ function prefetchCue(c) {
 let lastCue = -2;
 function composite(t, i) {
   const on = $("#showOverlay").checked && S.cur;
-  const c = S.cues[i];
+  const q0 = S.seq, pc0 = q0 && q0.i >= 0 ? q0.pieces[q0.i] : null;
+  let c = S.cues[i];
+  if (c && pc0 && !spokenIn(c, pc0.start, pc0.end)) c = null;  // reel: no lines from outside the clip
   showLayer(ly.sub, on && c ? overlayURL("sub", cueLines(c, t)) : null);
   if (i !== lastCue) { lastCue = i; prefetchCue(S.cues[i]); prefetchCue(S.cues[i + 1]); }
   // reel preview layers: chapter card (+ blurred picture), tag, punch-in zoom
@@ -635,7 +637,12 @@ function planDur(pl) {
   const d = (cs) => cs.reduce((a, c) => a + c.end - c.start, 0);
   return d(pl.hook || []) + pl.chapters.reduce((a, ch) => a + d(ch.clips), 0);
 }
-function clipCues(c) { return S.cues.filter((x) => x.end > c.start + 0.05 && x.start < c.end - 0.05); }
+// same rule as highlights.spoken_in: a line belongs to a clip only if some of its words are spoken inside it
+function spokenIn(x, a, b) {
+  if (!x.words?.length) return x.end > a + 0.3 && x.start < b - 0.3;
+  return x.words.some((w) => (w.s + w.e) / 2 >= a && (w.s + w.e) / 2 <= b);
+}
+function clipCues(c) { return S.cues.filter((x) => x.end > c.start && x.start < c.end && spokenIn(x, c.start, c.end)); }
 function clipRow(c, ci, k) {
   return `<div class="clip" data-ci="${ci}" data-k="${k}">
     <button data-a="play" title="預覽這段">▶</button>
