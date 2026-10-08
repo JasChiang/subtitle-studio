@@ -229,10 +229,7 @@ td.act button:hover { border-color: var(--line); background: var(--raised); }
 .hl-edit .chap-head input + input { font-weight: 400; color: var(--muted); font-size: 13px; }
 .hl-edit .chap-head input:hover, .hl-edit .chap-head input:focus { border-color: var(--line); }
 .hl-edit .chap-head button { font-size: 12px; padding: 4px 9px; }
-.hl-edit .clip { display: grid; grid-template-columns: 30px 98px 98px minmax(0, 1fr) 150px; gap: 8px; align-items: start; padding: 10px 8px; border-radius: var(--r-m); background: var(--panel); margin-bottom: 6px; border: 1px solid transparent; }
 .hl-edit .clip.playing { border-color: var(--accent); background: #2a2a24; }
-.hl-edit .clip input { width: 94px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
-.hl-edit .clip > button[data-a="play"] { padding: 3px 0; }
 .hl-edit .clip .cl { position: relative; padding: 3px 0 3px 22px; border-bottom: 1px solid rgba(52,55,61,.7); }
 .hl-edit .clip .cl:last-of-type { border-bottom: 0; }
 .hl-edit .clip .cl [contenteditable] { outline: none; border-radius: var(--r-s); padding: 1px 4px; white-space: pre-wrap; font-size: 13px; }
@@ -243,10 +240,6 @@ td.act button:hover { border-color: var(--line); background: var(--raised); }
 .hl-edit .clip .cl:hover .drop, .hl-edit .clip .cl .drop:focus-visible { opacity: 1; color: var(--warn); }
 .hl-edit .clip .why { color: var(--faint); font-size: 11px; margin-top: 6px; line-height: 1.5; }
 .hl-edit .clip .tight { color: var(--warn); font-size: 11px; margin-top: 4px; }
-.hl-edit .clip-acts { display: grid; grid-template-columns: repeat(2, auto); gap: 4px; justify-content: end; align-content: start; }
-.hl-edit .clip-acts button[data-a="up"], .hl-edit .clip-acts button[data-a="down"], .hl-edit .clip-acts button[data-a="del"] { min-width: 30px; }
-.hl-edit .clip-acts button { padding: 2px 7px; font-size: 11px; background: transparent; }
-.hl-edit .clip-acts button:hover { background: var(--raised); }
 .hl-out { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
 .hl-out .row { margin: 0; flex-wrap: wrap; }
 .hl-out label { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
@@ -270,3 +263,20 @@ dialog::backdrop { background: rgba(10,10,12,.6); }
 @media (max-width: 900px) { aside { width: 180px; } .hl-grid { grid-template-columns: 1fr; } .hl-form { position: static; border-right: 0; } .hdr-project { display: none; } }
 @media (prefers-reduced-motion: reduce) { #progBar { transition: none; } }
 .stages .all-done { margin: 10px 2px; }
+
+/* clip: left = when (play, in/out, order); right = what (lines) with trim controls at the edge they change */
+.hl-edit .clip { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 14px; padding: 10px 12px; border-radius: var(--r-m); background: var(--panel); margin-bottom: 6px; border: 1px solid transparent; }
+.hl-edit .clip-side { display: grid; gap: 8px; align-content: start; }
+.hl-edit .clip-times { display: grid; grid-template-columns: 30px 1fr 1fr; gap: 4px; }
+.hl-edit .clip-times input { width: 100%; padding: 3px 5px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.hl-edit .clip-times .play { padding: 3px 0; }
+.hl-edit .clip-move { display: flex; gap: 4px; flex-wrap: wrap; }
+.hl-edit .edge { display: flex; gap: 6px; }
+.hl-edit .edge.top { margin-bottom: 4px; } .hl-edit .edge.bottom { margin-top: 4px; }
+.hl-edit .edge button, .hl-edit .clip-move button { padding: 2px 8px; font-size: 11px; background: transparent; color: var(--muted); }
+.hl-edit .edge button:hover, .hl-edit .clip-move button:hover { color: var(--ink); background: var(--raised); }
+.hl-edit .clip-move .danger:hover { color: var(--warn); border-color: rgba(240,122,90,.5); }
+/* quiet until the clip is being worked on */
+.hl-edit .edge, .hl-edit .clip-move { opacity: .35; transition: opacity .12s; }
+.hl-edit .clip:hover .edge, .hl-edit .clip:hover .clip-move, .hl-edit .clip:focus-within .edge, .hl-edit .clip:focus-within .clip-move { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .hl-edit .edge, .hl-edit .clip-move { transition: none; } }

@@ -660,25 +660,40 @@ function tightEdges(c) {  // a cut with no pause on that side would slice into c
 function clipRow(c, ci, k) {
   const tight = tightEdges(c);
   return `<div class="clip" data-ci="${ci}" data-k="${k}">
-    <button data-a="play" title="預覽這段">▶</button>
-    <input value="${fmt(c.start)}" data-f="start"><input value="${fmt(c.end)}" data-f="end">
-    <div class="txt">${clipCues(c).map((x) => `<div class="cl" data-id="${x.id}">
+    <div class="clip-side">
+      <div class="clip-times">
+        <button data-a="play" class="play" title="預覽這段">▶</button>
+        <input value="${fmt(c.start)}" data-f="start" aria-label="入點" title="入點">
+        <input value="${fmt(c.end)}" data-f="end" aria-label="出點" title="出點">
+      </div>
+      <div class="clip-move">
+        <button data-a="up" title="跟上一段交換順序">上移</button><button data-a="down" title="跟下一段交換順序">下移</button>
+        <button data-a="del" class="danger" title="把整段從企劃拿掉">刪除這段</button>
+      </div>
+    </div>
+    <div class="txt">
+      <div class="edge top">
+        <button data-a="extPrev" title="把這段前面的那一句也剪進來">⤒ 往前多一句</button>
+        <button data-a="cutFirst" title="這段改從第二句開始">拿掉開頭這句</button>
+      </div>
+      ${clipCues(c).map((x) => `<div class="cl" data-id="${x.id}">
         <button class="drop" data-a="dropLine" title="從這段拿掉這一句（中間的句子會變成跳剪）">✕</button>
         <div contenteditable="plaintext-only" data-cf="text">${esc(x.text)}</div>
         <div contenteditable="plaintext-only" data-cf="tr" class="tr">${esc(x.tr || "")}</div></div>`).join("")}
+      <div class="edge bottom">
+        <button data-a="extNext" title="把這段後面的那一句也剪進來">⤓ 往後多一句</button>
+        <button data-a="cutLast" title="這段改在倒數第二句結束">拿掉結尾這句</button>
+      </div>
+      ${tight.length ? `<div class="tight" title="講者在這裡沒有停頓，剪在這裡會切到連續的語音；可以往前或往後多剪一句">⚠ ${tight.join("、")}接點沒有停頓</div>` : ""}
       ${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}
-      ${tight.length ? `<div class="tight" title="講者在這裡沒有停頓，剪在這裡會切到連續的語音；可用＋／－前一句、後一句調整">⚠ ${tight.join("、")}接點沒有停頓</div>` : ""}</div>
-    <div class="clip-acts">
-      <button data-a="extPrev" title="往前多加一句">＋前一句</button><button data-a="cutFirst" title="去掉開頭那一句">－前一句</button>
-      <button data-a="extNext" title="往後多加一句">＋後一句</button><button data-a="cutLast" title="去掉結尾那一句">－後一句</button>
-      <button data-a="up" title="上移">↑</button><button data-a="down" title="下移">↓</button><button data-a="del" title="刪除這段">✕</button></div></div>`;
+    </div></div>`;
 }
 function renderPlan() {
   const pl = S.plan, box = $("#hlEdit");
   if (!pl) { box.innerHTML = `<p class="muted">選一個企劃，或在左邊產生新的。</p>`; return; }
   const r = pl.rendered, subs = pl.options?.subs || "burn";
   box.innerHTML = `<div class="hl-bar"><input class="title" id="plTitle" value="${esc(pl.title || "")}">
-      <span id="plDur" class="muted">${planDur(pl).toFixed(1)} 秒</span>
+      <span id="plDur" class="muted">${planDur(pl).toFixed(1)} 秒${S.planDirty ? "（未存檔）" : ""}</span>
       <button id="plPreview" class="primary">▶ 預覽</button><button id="plSave">存檔</button></div>
     <div class="muted small">要求：${esc(pl.request?.focus || "AI 自選最精彩段落")}｜目標 ${pl.request?.seconds || "?"} 秒。
       預覽在上方播放器即時合成（字幕、字卡、標籤、放大都沒有燒進去），下面的字幕可以直接改，改完預覽立刻反映。</div>
