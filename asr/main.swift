@@ -4,7 +4,7 @@
 //
 // stdout: {"locale":…, "segments":[{text,start,end,words:[{text,start,end}]}]}
 // stderr: "PROGRESS <seconds>" lines as finalized segments arrive, plus diagnostics.
-// Ported from caption-lab Transcription.swift (SpeechAnalyzer path, no SFSpeechRecognizer auth needed).
+// Uses the SpeechAnalyzer / SpeechTranscriber API (macOS 26+); no SFSpeechRecognizer authorization needed.
 import AVFoundation
 import Foundation
 import Speech

@@ -1,8 +1,8 @@
 """Subtitle pipeline: Apple ASR (word clock) → Gemini video reference → correction → alignment → cues → translation.
 
 Every stage caches its output in the project dir, so any stage can be re-run on its own.
-Design follows caption-lab: the reference transcription never sees the ASR text (independent second
-opinion), and timing always comes from Apple's per-word clock — Gemini only changes TEXT.
+The reference transcription never sees the ASR text (an independent second opinion), and timing always
+comes from Apple's per-word clock — Gemini only changes TEXT.
 """
 from __future__ import annotations
 
@@ -31,13 +31,14 @@ DEFAULT_OPTIONS = {
     "text_model": "gemini-flash-latest",
     "chunk_minutes": 10,
     "drop_fillers": True,          # um / uh / 嗯 / 呃
-    "semantic_breaks": True,       # Gemini picks meaning-unit breaks; rules remain the fallback
+    "semantic_breaks": True,       # Gemini watches/listens and picks subtitle breaks; rules only as fallback
+    "seg_thinking": "low",         # Gemini thinking level for segmentation: low / medium / high
     "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
     "max_duration": 6.5,
     "gap_break": 0.7,
     "translate": True,
     "target_lang": "繁體中文（台灣）",
-    "translate_style": "台灣用語、口語通順自然；人名用台灣慣用譯名（例如 Ben Affleck → 班艾佛列克）；保留品牌與專有名詞原文",
+    "translate_style": "台灣用語、口語通順自然；人名用台灣慣用譯名；保留品牌與專有名詞原文",
     "workers": 4,
 }
 
@@ -261,6 +262,21 @@ def chunks(duration: float, minutes: float) -> list[tuple[float, float]]:
     return [(i * step, duration if i == n - 1 else (i + 1) * step) for i in range(n)]
 
 
+def media_has_video(p: Project) -> bool:
+    return bool(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index", "-of", "csv=p=0",
+         str(p.media)]).strip())
+
+
+def make_proxy(p: Project, a: float, b: float, out: Path, has_video: bool) -> str:
+    """Low-res (360p / 2 fps) excerpt for Gemini video understanding. Returns the MIME type."""
+    vf = ["-vf", "scale=-2:360,fps=2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32"] if has_video \
+        else ["-vn"]
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media),
+                    *vf, "-c:a", "aac", "-b:a", "64k", "-ac", "1", str(out)], check=True)
+    return "video/mp4" if has_video else "audio/mp4"
+
+
 def stage_reference(p: Project):
     o = p.options
     duration = p.meta.get("duration") or float(subprocess.check_output(
@@ -268,9 +284,7 @@ def stage_reference(p: Project):
     spans = chunks(duration, o["chunk_minutes"])
     pad = 8.0
     (p.dir / "reference").mkdir(exist_ok=True)
-    has_video = bool(subprocess.check_output(
-        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index", "-of", "csv=p=0",
-         str(p.media)]).strip())
+    has_video = media_has_video(p)
     done = [0]
 
     def one(i_span):
@@ -281,11 +295,7 @@ def stage_reference(p: Project):
             return
         a0, b0 = max(0, a - pad), min(duration, b + pad)
         proxy = p.dir / "reference" / f"chunk_{i:03d}.mp4"
-        vf = ["-vf", "scale=-2:360,fps=2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32"] if has_video \
-            else ["-vn"]
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a0:.3f}", "-t", f"{b0 - a0:.3f}", "-i",
-                        str(p.media), *vf, "-c:a", "aac", "-b:a", "64k", "-ac", "1", str(proxy)], check=True)
-        mime = "video/mp4" if has_video else "audio/mp4"
+        mime = make_proxy(p, a0, b0, proxy, has_video)
         p.log(f"  參考稿 {i + 1}/{len(spans)}：上傳 {fmt_mmss(a0)}–{fmt_mmss(b0)}（{proxy.stat().st_size / 1e6:.1f} MB）")
         f = gemini.upload_file(proxy, mime, log=p.log)
         try:
@@ -613,108 +623,86 @@ SEG_SCHEMA = {"type": "object", "properties": {"breaks": {"type": "array", "item
               "required": ["breaks"]}
 
 
-def hard_break(prev: dict, w: dict, o: dict) -> bool:
-    return bool(w.get("spk")) or w["s"] - prev["e"] > o["gap_break"]
+def seg_windows(words: list[dict], minutes: float) -> list[list[int]]:
+    """~N-minute windows of word indices, each ending at the longest pause near its end so no window
+    boundary falls mid-sentence."""
+    size = max(60.0, minutes * 60)
+    out, start = [], 0
+    while start < len(words):
+        t_end = words[start]["s"] + size
+        end = next((i for i in range(start, len(words)) if words[i]["s"] >= t_end), len(words))
+        if end < len(words):
+            lo = next((i for i in range(start + 1, end) if words[i]["s"] >= t_end - 30), start + 1)
+            end = max(range(lo, end + 1), key=lambda i: words[i]["s"] - words[i - 1]["e"])
+        out.append(list(range(start, end)))
+        start = end
+    return out
 
 
 def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
-    """LLM picks subtitle breaks so each line is a meaning unit; hard breaks (speaker change, long pause) are
-    fixed beforehand so parallel windows never cut a sentence. Results are re-checked locally."""
+    """Gemini watches and listens to each stretch of the video together with the numbered transcript words,
+    and splits them into subtitle lines the way a human subtitler would — by rhythm, pauses and meaning."""
     cjk, max_chars = cue_limits(words, o)
-    ideal = max(8, int(max_chars * (0.6 if cjk else 0.65)))
-    # blocks between hard breaks, packed into windows of ≤ ~350 words
-    blocks, cur = [], []
-    for i, w in enumerate(words):
-        if cur and hard_break(words[i - 1], w, o):
-            blocks.append(cur)
-            cur = []
-        cur.append(i)
-    if cur:
-        blocks.append(cur)
-    windows, win = [], []
-    for b in blocks:
-        if win and len(win) + len(b) > 350:
-            windows.append(win)
-            win = []
-        win += b
-    if win:
-        windows.append(win)
-    hard = {i for b in blocks for i in [b[0]]}  # index that STARTS a block
-
+    windows = seg_windows(words, o["chunk_minutes"])
+    has_video = media_has_video(p)
+    (p.dir / "segment").mkdir(exist_ok=True)
     system = (
-        "You segment a transcript into on-screen subtitle lines. Words are given as [index]word. Return "
-        "`breaks`: the indices of words AFTER which a new subtitle starts.\n"
-        "- Every subtitle must be a natural meaning unit a viewer reads at a glance: a short full sentence, "
-        "or a clause / phrase of a longer sentence.\n"
-        "- NEVER end a subtitle on a word that needs the next one: articles, prepositions, possessives, "
-        "auxiliaries, conjunctions, relative pronouns, subjects without their verb (the, a, of, to, in, my, "
-        "his, is, was, and, but, because, that, which, I, you…; in Chinese 的/了/在/把/和/因為…). Put such "
-        "words at the START of the next subtitle instead.\n"
-        "- Prefer breaks at sentence ends, then clause boundaries (after commas, before and/but/because/"
-        "which/so), then between phrases. Don't split a name, number+unit, or fixed expression.\n"
-        f"- Length: at most {max_chars} characters per subtitle, ideally around {ideal}. A very short "
-        "sentence can share a line with the next one if both fit.\n"
-        "- ‖ marks a forced break (speaker change or long pause) — always break there.\n"
-        "Return breaks in ascending order."
+        "You are a professional subtitler. Watch and listen to the clip, then split the given transcript "
+        "words into subtitle lines exactly as a skilled human subtitler would for this video: follow the "
+        "speaker's rhythm, pauses, emphasis and meaning, so every line reads naturally on screen and appears "
+        f"in step with the speech. A comfortable line is roughly {max_chars} characters or less. Words are "
+        "given as [index@seconds]word, with seconds relative to the start of the clip. Return `breaks`: the "
+        "indices of words AFTER which a new subtitle line starts, in ascending order."
+        + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
     done, result = [0], {}
 
     def one(k):
         idxs = windows[k]
-        text = " ".join(("‖ " if i in hard and i != idxs[0] else "") + f"[{i}]{words[i]['t']}" for i in idxs)
-        brks: set[int] = set()
+        a0 = max(0.0, words[idxs[0]]["s"] - 1.0)
+        b0 = words[idxs[-1]]["e"] + 1.0
+        proxy = p.dir / "segment" / f"window_{k:03d}.mp4"
         try:
-            data, _ = gemini.generate_json(o["text_model"], [{"text": text}], system=system, schema=SEG_SCHEMA,
-                                           usage=p.usage, log=p.log, max_tokens=16384, thinking="low")
-            brks = {int(b) for b in data.get("breaks", []) if idxs[0] <= int(b) < idxs[-1]}
+            mime = make_proxy(p, a0, b0, proxy, has_video)
+            f = gemini.upload_file(proxy, mime, log=p.log)
+            try:
+                text = " ".join(f"[{i}@{words[i]['s'] - a0:.1f}]{words[i]['t']}" for i in idxs)
+                data, _ = gemini.generate_json(
+                    o["text_model"], [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": text}],
+                    system=system, schema=SEG_SCHEMA, low_res=True, usage=p.usage, log=p.log,
+                    max_tokens=32768, thinking=o.get("seg_thinking") or None)
+            finally:
+                gemini.delete_file(f["name"])
+            brks = {int(x) for x in data.get("breaks", []) if idxs[0] <= int(x) < idxs[-1]}
+            if not brks and len(idxs) > 30:
+                raise ValueError("no breaks returned")
         except Exception as e:
-            p.log(f"  語意斷句區塊 {k + 1} 失敗，改用規則斷句：{e}")
+            p.log(f"  語意斷句區塊 {k + 1} 失敗，這段改用規則斷句：{e}")
             result[k] = heuristic_groups([words[i] for i in idxs], o)
             return
+        finally:
+            proxy.unlink(missing_ok=True)
         groups, cur = [], []
         for i in idxs:
-            if cur and (i in hard or i - 1 in brks):
+            if cur and i - 1 in brks:
                 groups.append(cur)
                 cur = []
             cur.append(words[i])
         if cur:
             groups.append(cur)
+        # safety net only for clearly broken output (a "line" far too long to display)
         out = []
-        for g in groups:  # enforce limits: over-long → rule-based split inside
-            too_long = len(join_tokens([w["t"] for w in g])) > max_chars * 1.1 or \
-                g[-1]["e"] - g[0]["s"] > o["max_duration"] + 1.0
-            out += heuristic_groups(g, o) if too_long else [g]
+        for g in groups:
+            broken = len(join_tokens([w["t"] for w in g])) > max_chars * 2.5
+            out += heuristic_groups(g, o) if broken else [g]
         result[k] = out
         done[0] += 1
         p.status(progress=done[0] / len(windows))
+        p.log(f"  語意斷句 {k + 1}/{len(windows)}：{len(out)} 條")
 
-    with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
+    with ThreadPoolExecutor(max_workers=min(3, o["workers"])) as ex:
         list(ex.map(one, range(len(windows))))
-    p.log(f"  語意斷句：{len(windows)} 個區塊")
     return [g for k in range(len(windows)) for g in result[k]]
-
-
-DANGLING = {"the", "a", "an", "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "about", "my",
-            "your", "his", "her", "its", "our", "their", "this", "these", "those", "and", "but", "or", "nor",
-            "because", "that", "which", "who", "whose", "if", "as", "than", "is", "are", "was", "were", "be",
-            "been", "am", "do", "does", "did", "have", "has", "had", "will", "would", "can", "could", "should",
-            "i", "we", "they", "he", "she", "i'm", "it's", "you're", "we're", "they're", "very", "so",
-            "的", "在", "把", "和", "跟", "與", "被", "對", "從"}
-
-
-def fix_dangling(groups: list[list[dict]], o: dict, max_chars: int) -> list[list[dict]]:
-    """Deterministic cleanup: a line ending (without punctuation) on a word that needs the next one — the,
-    of, my, because… — hands that word to the next line, unless a hard break sits between them."""
-    for i in range(len(groups) - 1):
-        g, nxt = groups[i], groups[i + 1]
-        for _ in range(3):
-            last = g[-1]["t"]
-            if len(g) < 2 or not nxt or re.search(r"[.?!,;:—…\"」。，？！]$", last) \
-                    or norm(last) not in {norm(d) for d in DANGLING} or hard_break(g[-1], nxt[0], o) \
-                    or len(join_tokens([w["t"] for w in [g[-1]] + nxt])) > max_chars * 1.1:
-                break
-            nxt.insert(0, g.pop())
-    return [g for g in groups if g]
 
 
 def stage_cues(p: Project):
@@ -733,7 +721,7 @@ def stage_cues(p: Project):
         groups = semantic_groups(p, words, o)
     else:
         groups = heuristic_groups(words, o)
-    cues = finalize_cues(fix_dangling(groups, o, cue_limits(words, o)[1]))
+    cues = finalize_cues(groups)
     # keep the raw ASR text per cue for the "what changed" view
     asr_words = [(u["s"], u["t"]) for seg in asr["segments"] for u in asr_units(seg)]
     for c in cues:

@@ -2,9 +2,9 @@
 
 本機 web GUI 字幕工作台：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，並能在瀏覽器裡對著影片逐條修字幕、匯出 SRT／VTT。
 
-做法沿用 [caption-lab](https://github.com/JasChiang/caption-lab) 的原則：
+兩個設計原則：
 
-- **時間碼只來自 Apple。** `SpeechTranscriber` 給每個字的 audioTimeRange，Gemini 只改文字、不碰時間。
+- **時間碼只來自 Apple。** `SpeechTranscriber` 給每個字的時間範圍，Gemini 只改文字、不碰時間。
 - **參考稿要獨立。** Gemini 看影片聽寫時看不到 ASR 文字，這樣兩邊不會互相帶偏，同音字、專有名詞的錯誤才抓得出來。
 
 ## 需求
@@ -46,7 +46,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | **asr** | ffmpeg 抽 16 kHz 單聲道音軌 → `bin/apple-asr`（SpeechTranscriber，字級時間碼） | `audio.wav`, `asr.json` |
 | **reference** | 依「每段分鐘數」切成 360p／2 fps 的代理檔，用 File API 上傳；Gemini 逐字聽寫，並標出講者與專有名詞（3 段並行） | `reference/chunk_*.json`, `reference.json` |
 | **correct** | 把 ASR 段落和同時段的參考稿一起交給 Gemini（純文字）校正；段落中途換講者時標 `\|\|` | `corrected.json` |
-| **cues** | 以 60 段為一個視窗，用 difflib 把校正後的文字對回 ASR 字級時間，再依標點、停頓、長度、換講者斷句 | `cues.json` |
+| **cues** | 以 60 段為一個視窗，用 difflib 把校正後的文字對回 ASR 字級時間；再把影片片段和編號字詞交給 Gemini，由它看畫面、聽聲音決定每行字幕的斷點（語意斷句） | `cues.json` |
 | **translate** | 每 60 條一批，帶前後文翻譯（預設台灣繁中） | `cues.json` 的 `tr` |
 
 每步都有快取，可以單獨重跑；勾選「強制重算」會忽略快取。
@@ -55,7 +55,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 
 - 字相同、或一對一替換的字，沿用 ASR 原本的時間；多出或缺少的字，在對應的 ASR 區間或空隙內依字數分配時間。
 - 用視窗而不是逐段對齊，是因為 LLM 偶爾會把字搬到相鄰段落，即使 prompt 禁止。整個視窗一起比對，被搬走的字仍會落回正確的時間點。
-- 斷句預設：英文每條 ≤ 70 字元、中文 ≤ 22 字、每條 ≤ 6.5 秒，停頓超過 0.7 秒就強制斷開；斷點優先選句號 > 逗號 > 連接詞。插話的極短字幕（例如另一個人說的「Yeah.」）會併入下一條，避免時間重疊。
+- 語意斷句：每段約「每段分鐘數」長，切在最長的停頓上，不會切斷句子；Gemini 只拿到「一行大約幾個字元好讀」這個參考，其餘照說話的節奏、停頓與語意自行判斷。關掉 `semantic_breaks` 或 Gemini 失敗時，改用規則斷句（標點、停頓、長度）。
 
 ## 編輯器
 
@@ -85,12 +85,13 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | `text_model` | `gemini-flash-latest` | 校正與翻譯用的模型 |
 | `chunk_minutes` | 10 | 參考稿每段長度 |
 | `drop_fillers` | true | 移除 um／uh／嗯／呃 |
-| `max_chars` / `max_duration` / `gap_break` | 0（自動）/ 6.5 / 0.7 | 斷句參數 |
+| `semantic_breaks` / `seg_thinking` | true / low | 語意斷句開關與 Gemini 思考程度（low／medium／high） |
+| `max_chars` / `max_duration` / `gap_break` | 0（自動）/ 6.5 / 0.7 | 一行好讀的長度參考，以及規則斷句的參數 |
 | `target_lang` / `translate_style` | 繁體中文（台灣） | 翻譯目標語言與風格 |
 
 ## 花費參考
 
-以一部 58 分鐘的英文訪談實測：Gemini Flash 跑完整流程約 **US$0.67**、約 8 分鐘（ASR 1 分鐘、參考稿 3 分鐘、校正 2.5 分鐘、翻譯 2 分鐘）。GUI 右上角會顯示估算花費。
+以一部 58 分鐘的英文訪談實測：Gemini Flash 跑完整流程約 US$1、約 10 分鐘（ASR 1 分鐘、參考稿 3 分鐘、校正 2.5 分鐘、語意斷句 2 分鐘、翻譯 2 分鐘）。實際花費依模型價格與影片內容而定。GUI 右上角會顯示估算花費。
 
 ## 專案結構
 

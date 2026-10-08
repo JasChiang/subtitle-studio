@@ -1,6 +1,6 @@
 """Minimal Gemini REST client (stdlib only): File API upload, generateContent, usage ledger.
 
-Mirrors caption-lab's GeminiClient: requested model first, then a fallback chain on transient errors.
+Requested model first, then a fallback chain on transient errors.
 """
 from __future__ import annotations
 
