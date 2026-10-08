@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subtitle Studio</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">Subtitle Studio <span class="sub">Apple ASR × Gemini</span></div>
+  <div class="hdr-right">
+    <span id="keyBadge" class="badge"></span>
+    <span id="costBadge" class="badge muted"></span>
+  </div>
+</header>
+
+<div class="layout">
+  <aside id="sidebar">
+    <div class="side-head">
+      <button id="newBtn" class="primary">＋ 新增影片</button>
+    </div>
+    <ul id="projectList"></ul>
+  </aside>
+
+  <main id="main">
+    <div id="empty" class="empty">
+      <p>選一個專案，或「＋ 新增影片」。</p>
+      <p class="muted">流程：Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 以參考稿校正 ASR 文字（時間碼仍來自 Apple）→ 斷句 → 翻譯。</p>
+    </div>
+
+    <section id="workspace" hidden>
+      <div class="top">
+        <div class="player">
+          <div class="video-wrap">
+            <video id="video" controls preload="metadata"></video>
+            <div id="overlay" class="overlay"><div id="ovSrc" class="ov-src"></div><div id="ovTr" class="ov-tr"></div></div>
+          </div>
+          <div class="player-bar">
+            <span id="timecode" class="mono">00:00.000</span>
+            <label><input type="checkbox" id="follow" checked> 跟隨播放</label>
+            <label><input type="checkbox" id="showOverlay" checked> 疊字幕</label>
+            <label><input type="checkbox" id="karaoke" checked> 逐字高亮</label>
+            <span class="muted small">快速鍵：⌥Space 播放／暫停 · ⌥[ ⌥] 設定入／出點 · ⌥S 在播放點切開 · ⌘S 存檔</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-tabs">
+            <button data-tab="run" class="active">執行</button>
+            <button data-tab="opts">設定</button>
+            <button data-tab="ref">參考稿</button>
+          </div>
+          <div class="tab" id="tab-run">
+            <div class="proj-title"><b id="projName"></b><div id="projMedia" class="muted small mono"></div></div>
+            <div id="stageList" class="stages"></div>
+            <div class="row">
+              <label><input type="checkbox" id="force"> 強制重算（忽略快取）</label>
+            </div>
+            <div class="row gap">
+              <button id="runBtn" class="primary">執行勾選步驟</button>
+              <button id="trMissingBtn">補翻缺譯</button>
+            </div>
+            <div class="progress"><div id="progBar"></div></div>
+            <div id="statusLine" class="small"></div>
+            <pre id="log" class="log"></pre>
+          </div>
+          <div class="tab" id="tab-opts" hidden>
+            <form id="optsForm" class="opts"></form>
+            <button id="saveOpts">儲存設定</button>
+            <p class="muted small">改了斷句參數只需重跑「斷句」；改了詞彙表／脈絡建議重跑「校正」。</p>
+          </div>
+          <div class="tab" id="tab-ref" hidden>
+            <div id="refView" class="ref"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button id="saveBtn">存檔</button>
+        <span id="dirty" class="dirty" hidden>● 未存檔</span>
+        <input id="search" type="search" placeholder="搜尋字幕…">
+        <label><input type="checkbox" id="onlyChanged"> 只看校正有改的</label>
+        <span class="spacer"></span>
+        <span class="muted small">匯出：</span>
+        <a class="btn" data-export="bi">雙語 SRT</a>
+        <a class="btn" data-export="bi-tr">雙語（譯上）</a>
+        <a class="btn" data-export="src">原文 SRT</a>
+        <a class="btn" data-export="tr">譯文 SRT</a>
+        <a class="btn" data-export="vtt">VTT</a>
+        <a class="btn" data-export="json">字級 JSON</a>
+      </div>
+
+      <div class="cues-wrap">
+        <table id="cues">
+          <thead><tr><th>#</th><th>入點</th><th>出點</th><th>原文</th><th>譯文</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="newDlg">
+  <form method="dialog" class="dlg">
+    <h3>新增影片</h3>
+    <label>本機檔案路徑（不會複製，直接讀原檔）</label>
+    <div class="row gap"><input id="pathInput" class="grow mono" placeholder="/Users/…/video.mp4"><button type="button" id="browseBtn">瀏覽…</button></div>
+    <div id="browser" class="browser" hidden></div>
+    <div id="drop" class="drop">或把影片拖到這裡上傳（會複製一份到 uploads/）</div>
+    <div class="grid2">
+      <label>語言（ASR locale）<select id="newLocale"></select></label>
+      <label>參考稿模型<input id="newRefModel" class="mono"></label>
+    </div>
+    <label>影片脈絡（誰、什麼節目，幫助 Gemini 認人名）</label>
+    <textarea id="newContext" rows="2"></textarea>
+    <label>詞彙表（人名、品牌、術語，逗號或換行分隔）</label>
+    <textarea id="newGlossary" rows="2"></textarea>
+    <div class="row gap end">
+      <button value="cancel">取消</button>
+      <button id="createBtn" class="primary" value="default">建立並開始轉錄</button>
+    </div>
+    <div id="newErr" class="err"></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
