@@ -4,29 +4,43 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Subtitle Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <div class="brand">Subtitle Studio <span class="sub">Apple ASR × Gemini</span></div>
+<header class="appbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Subtitle Studio</div>
+  <div class="hdr-project" id="hdrProject"></div>
+  <nav class="views" aria-label="工作區">
+    <button data-view="subs" class="active">字幕</button>
+    <button data-view="summary">摘要</button>
+    <button data-view="hl">精華剪輯</button>
+  </nav>
   <div class="hdr-right">
+    <span id="costBadge" class="meta"></span>
     <span id="keyBadge" class="badge"></span>
-    <span id="costBadge" class="badge muted"></span>
   </div>
 </header>
 
 <div class="layout">
   <aside id="sidebar">
-    <div class="side-head">
-      <button id="newBtn" class="primary">＋ 新增影片</button>
-    </div>
+    <button id="newBtn" class="primary wide">新增影片</button>
+    <div class="side-label">專案</div>
     <ul id="projectList"></ul>
   </aside>
 
   <main id="main">
     <div id="empty" class="empty">
-      <p>選一個專案，或「＋ 新增影片」。</p>
-      <p class="muted">流程：Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 以參考稿校正 ASR 文字（時間碼仍來自 Apple）→ 斷句 → 翻譯。</p>
+      <h1>把一支影片變成可以發布的字幕與精華</h1>
+      <ol class="flow">
+        <li><b>Apple 語音辨識</b>在你的 Mac 上逐字轉錄，每個字都有時間碼</li>
+        <li><b>Gemini 看影片</b>寫一份獨立的參考稿，認出講者與專有名詞</li>
+        <li><b>校正、斷句、翻譯</b>，時間碼仍以 Apple 為準</li>
+        <li><b>摘要與精華剪輯</b>：先預覽、可以改，確認後才輸出</li>
+      </ol>
+      <button class="primary" onclick="document.getElementById('newBtn').click()">新增影片</button>
     </div>
 
     <section id="workspace" hidden>
@@ -37,45 +51,44 @@
             <div id="layers" class="layers"><img id="lyCard" alt=""><img id="lyTag" alt=""><img id="lySub" alt=""></div>
           </div>
           <div id="reelBar" class="reel-bar" hidden>
-            <button id="rbPlay" title="播放／暫停（⌥Space）">▶</button>
-            <span id="rbTime" class="mono">00:00.0 / 00:00.0</span>
-            <div class="rb-track"><div id="rbMarks"></div><input type="range" id="rbRange" min="0" max="1" step="0.01" value="0"></div>
-            <span id="rbLabel" class="small"></span>
-            <button id="rbExit">結束預覽</button>
+            <button id="rbPlay" class="icon" title="播放／暫停（⌥Space）">▶</button>
+            <span id="rbTime" class="tc">00:00.0 / 00:00.0</span>
+            <div class="rb-track"><div id="rbMarks"></div><input type="range" id="rbRange" min="0" max="1" step="0.01" value="0" aria-label="精華時間軸"></div>
+            <span id="rbLabel" class="rb-label"></span>
+            <button id="rbExit" class="ghost">結束預覽</button>
           </div>
           <div class="player-bar">
-            <span id="timecode" class="mono">00:00.000</span>
-            <label><input type="checkbox" id="follow" checked> 跟隨播放</label>
-            <label><input type="checkbox" id="showOverlay" checked> 疊字幕／字卡</label>
-            <label title="與輸出的精華影片共用這個設定"><input type="checkbox" id="karaoke"> 逐字變色</label>
-            <span class="muted small">快速鍵：⌥Space 播放／暫停 · ⌥[ ⌥] 設定入／出點 · ⌥S 在播放點切開 · ⌘S 存檔</span>
+            <span id="timecode" class="tc big">00:00.000</span>
+            <label class="toggle"><input type="checkbox" id="follow" checked> 跟隨播放</label>
+            <label class="toggle"><input type="checkbox" id="showOverlay" checked> 疊字幕與字卡</label>
+            <label class="toggle" title="與輸出的精華影片共用這個設定"><input type="checkbox" id="karaoke"> 逐字變色</label>
+            <span class="spacer"></span>
+            <span class="keys" title="快速鍵"><kbd>⌥Space</kbd> 播放 <kbd>⌥[</kbd><kbd>⌥]</kbd> 入出點 <kbd>⌥S</kbd> 切開 <kbd>⌘S</kbd> 存檔</span>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-tabs">
-            <button data-tab="run" class="active">執行</button>
+          <div class="panel-tabs" role="tablist">
+            <button data-tab="run" class="active">處理流程</button>
             <button data-tab="opts">設定</button>
             <button data-tab="ref">參考稿</button>
           </div>
           <div class="tab" id="tab-run">
-            <div class="proj-title"><b id="projName"></b><div id="projMedia" class="muted small mono"></div></div>
+            <div class="proj-title"><b id="projName"></b><div id="projMedia" class="path"></div></div>
             <div id="stageList" class="stages"></div>
-            <div class="row">
-              <label><input type="checkbox" id="force"> 強制重算（忽略快取）</label>
-            </div>
+            <label class="toggle small"><input type="checkbox" id="force"> 忽略快取，重新計算勾選的步驟</label>
             <div class="row gap">
-              <button id="runBtn" class="primary">執行勾選步驟</button>
-              <button id="trMissingBtn">補翻缺譯</button>
+              <button id="runBtn" class="primary">執行勾選的步驟</button>
+              <button id="trMissingBtn">補翻缺少的譯文</button>
             </div>
             <div class="progress"><div id="progBar"></div></div>
-            <div id="statusLine" class="small"></div>
-            <pre id="log" class="log"></pre>
+            <div id="statusLine" class="status"></div>
+            <details class="logbox"><summary>處理紀錄</summary><pre id="log" class="log"></pre></details>
           </div>
           <div class="tab" id="tab-opts" hidden>
             <form id="optsForm" class="opts"></form>
-            <button id="saveOpts">儲存設定</button>
-            <p class="muted small">改了斷句參數只需重跑「斷句」；改了詞彙表／脈絡建議重跑「校正」。</p>
+            <div class="row gap"><button id="saveOpts" class="primary">儲存設定</button></div>
+            <p class="hint">改了斷句設定只需重跑「斷句」；改了詞彙表或影片脈絡，建議重跑「校正」。</p>
           </div>
           <div class="tab" id="tab-ref" hidden>
             <div id="refView" class="ref"></div>
@@ -83,38 +96,34 @@
         </div>
       </div>
 
-      <div class="views">
-        <button data-view="subs" class="active">字幕</button>
-        <button data-view="summary">摘要</button>
-        <button data-view="hl">精華剪輯</button>
-      </div>
       <div id="view-subs" class="view">
-      <div class="toolbar">
-        <button id="saveBtn">存檔</button>
-        <span id="dirty" class="dirty" hidden>● 未存檔</span>
-        <input id="search" type="search" placeholder="搜尋字幕…">
-        <label><input type="checkbox" id="onlyChanged"> 只看校正有改的</label>
-        <span class="spacer"></span>
-        <span class="muted small">匯出：</span>
-        <a class="btn" data-export="bi">雙語 SRT</a>
-        <a class="btn" data-export="bi-tr">雙語（譯上）</a>
-        <a class="btn" data-export="src">原文 SRT</a>
-        <a class="btn" data-export="tr">譯文 SRT</a>
-        <a class="btn" data-export="vtt">VTT</a>
-        <a class="btn" data-export="json">字級 JSON</a>
-      </div>
-
-      <div class="cues-wrap">
-        <table id="cues">
-          <thead><tr><th>#</th><th>入點</th><th>出點</th><th>原文</th><th>譯文</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+        <div class="toolbar">
+          <button id="saveBtn" class="primary">存檔</button>
+          <span id="dirty" class="dirty" hidden>有未存檔的修改</span>
+          <input id="search" type="search" placeholder="搜尋原文或譯文">
+          <label class="toggle"><input type="checkbox" id="onlyChanged"> 只看校正改過的</label>
+          <span class="spacer"></span>
+          <div class="export" role="group" aria-label="匯出">
+            <span class="export-label">匯出</span>
+            <a class="btn" data-export="bi">雙語 SRT</a>
+            <a class="btn" data-export="bi-tr">雙語（譯文在上）</a>
+            <a class="btn" data-export="src">原文 SRT</a>
+            <a class="btn" data-export="tr">譯文 SRT</a>
+            <a class="btn" data-export="vtt">VTT</a>
+            <a class="btn" data-export="json">字級 JSON</a>
+          </div>
+        </div>
+        <div class="cues-wrap">
+          <table id="cues">
+            <thead><tr><th class="n">#</th><th>入點</th><th>出點</th><th>原文</th><th>譯文</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div id="view-summary" class="view scroll" hidden>
         <div class="toolbar">
-          <input id="sumNote" class="grow" placeholder="額外要求（選填），例：語氣輕鬆一點、貼文給 Threads 用">
+          <input id="sumNote" class="grow" placeholder="額外要求（選填），例：語氣輕鬆一點、貼文要給 Threads 用">
           <button id="sumBtn" class="primary">產生摘要</button>
           <a class="btn" id="sumMd">下載 Markdown</a>
           <button id="sumChapters">複製 YouTube 章節</button>
@@ -125,19 +134,22 @@
       <div id="view-hl" class="view scroll" hidden>
         <div class="hl-grid">
           <div class="hl-form">
-            <h4>新增剪輯企劃</h4>
-            <label>想剪哪些內容（選填，留空由 AI 挑最精彩的）</label>
-            <textarea id="hlFocus" rows="3" placeholder="例：他解釋 AI 技術原理、展現專業的段落；或：所有談到家庭的部分"></textarea>
-            <div class="row gap"><label>目標長度（秒）<input id="hlSecs" type="number" value="90" min="10" step="5" style="width:80px"></label></div>
-            <label class="row gap"><input type="checkbox" id="hlChapters" checked> 分章節（章節字卡＋左上標籤）</label>
-            <label class="row gap"><input type="checkbox" id="hlHook" checked> 開頭放一句 hook</label>
-            <label class="row gap"><input type="checkbox" id="hlZoom" checked> 跳剪時交替放大遮接點</label>
-            <label class="row gap" title="先依逐字稿選出初稿，剪成低解析粗剪，再請 Gemini 像剪輯師一樣看粗剪：修正沒講完、語氣不好、接得突兀的段落（多約 $0.03）"><input type="checkbox" id="hlReview" checked> 剪輯師看粗剪複查</label>
-            <button id="hlPlanBtn" class="primary">產生剪輯企劃</button>
-            <h4>企劃清單</h4>
+            <h2>新的剪輯企劃</h2>
+            <label for="hlFocus">想剪哪些內容</label>
+            <textarea id="hlFocus" rows="4" placeholder="例：他解釋 AI 技術原理、展現專業的段落。留空就由 AI 挑最精彩的部分。"></textarea>
+            <label for="hlSecs">目標長度</label>
+            <div class="secs"><input id="hlSecs" type="number" value="90" min="10" step="5"><span>秒</span></div>
+            <div class="checks">
+              <label class="toggle"><input type="checkbox" id="hlChapters" checked> 分章節（章節字卡與左上標籤）</label>
+              <label class="toggle"><input type="checkbox" id="hlHook" checked> 開頭放一句引子</label>
+              <label class="toggle"><input type="checkbox" id="hlZoom" checked> 跳剪時交替放大，遮住接點</label>
+              <label class="toggle" title="先依逐字稿選出初稿，剪成低解析粗剪並附前後文，請 Gemini 像剪輯師一樣看過再修正（每次多約 $0.05）"><input type="checkbox" id="hlReview" checked> 剪輯師看粗剪複查</label>
+            </div>
+            <button id="hlPlanBtn" class="primary wide">產生剪輯企劃</button>
+            <h2 class="list-title">企劃</h2>
             <div id="hlList" class="hl-list"></div>
           </div>
-          <div class="hl-edit" id="hlEdit"><p class="muted">選一個企劃，或在左邊產生新的。</p></div>
+          <div class="hl-edit" id="hlEdit"><p class="placeholder">選一份企劃，或在左邊產生新的。</p></div>
         </div>
       </div>
     </section>
@@ -146,21 +158,21 @@
 
 <dialog id="newDlg">
   <form method="dialog" class="dlg">
-    <h3>新增影片</h3>
-    <label>本機檔案路徑（不會複製，直接讀原檔）</label>
-    <div class="row gap"><input id="pathInput" class="grow mono" placeholder="/Users/…/video.mp4"><button type="button" id="browseBtn">瀏覽…</button></div>
+    <h2>新增影片</h2>
+    <label for="pathInput">影片檔案（直接讀原檔，不會複製）</label>
+    <div class="row gap"><input id="pathInput" class="grow path-input" placeholder="/Users/…/video.mp4"><button type="button" id="browseBtn">瀏覽</button></div>
     <div id="browser" class="browser" hidden></div>
-    <div id="drop" class="drop">或把影片拖到這裡上傳（會複製一份到 uploads/）</div>
+    <div id="drop" class="drop">也可以把影片拖到這裡上傳（會複製一份到 uploads/）</div>
     <div class="grid2">
-      <label>語言（ASR locale）<select id="newLocale"></select></label>
-      <label>參考稿模型<input id="newRefModel" class="mono"></label>
+      <label>說話的語言<select id="newLocale"></select></label>
+      <label>看影片用的模型<input id="newRefModel" class="path-input"></label>
     </div>
-    <label>影片脈絡（選填）：誰、什麼節目。不填也能跑，填了人名和專有名詞會更準</label>
+    <label for="newContext">影片脈絡（選填）：誰、什麼節目。填了人名和專有名詞會更準</label>
     <textarea id="newContext" rows="2" placeholder="例：科技 Podcast，主持人訪問某新創執行長，談 AI 晶片與資料中心"></textarea>
-    <label>詞彙表（選填）：容易聽錯的人名、品牌、術語，逗號分隔。Gemini 也會自動從影片抓</label>
+    <label for="newGlossary">詞彙表（選填）：容易聽錯的人名、品牌、術語，用逗號分隔</label>
     <textarea id="newGlossary" rows="2" placeholder="例：人名、公司名、產品名、專有術語"></textarea>
     <div class="row gap end">
-      <button value="cancel">取消</button>
+      <button value="cancel" class="ghost">取消</button>
       <button id="createBtn" class="primary" value="default">建立並開始轉錄</button>
     </div>
     <div id="newErr" class="err"></div>

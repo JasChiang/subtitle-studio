@@ -49,9 +49,10 @@ const normTxt = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, 
 async function boot() {
   S.defaults = await api("/api/defaults");
   const kb = $("#keyBadge");
-  kb.textContent = S.defaults.has_key ? "Gemini key ✓" : "缺 GEMINI_API_KEY";
+  kb.textContent = S.defaults.has_key ? "Gemini 已連線" : "還沒設定 GEMINI_API_KEY";
   kb.className = "badge " + (S.defaults.has_key ? "ok" : "bad");
-  if (!S.defaults.has_asr) { kb.textContent += " · 缺 bin/apple-asr（跑 ./setup.sh）"; kb.className = "badge bad"; }
+  if (!S.defaults.has_asr) { kb.textContent = "缺少 bin/apple-asr，請先執行 ./setup.sh"; kb.className = "badge bad"; }
+  $(".views").hidden = true;
   S.locales = await api("/api/locales").catch(() => ["en-US", "zh-TW"]);
   await refreshProjects();
   const want = location.hash.slice(1);
@@ -66,7 +67,7 @@ async function refreshProjects() {
   ul.innerHTML = S.projects.map((p) => {
     const st = p.status?.state || "idle";
     const lab = st === "running" ? `執行中：${STAGE_INFO[p.status.stage]?.[0] || ""} ${Math.round((p.status.progress || 0) * 100)}%`
-      : st === "error" ? "⚠ 錯誤" : (p.done || []).map((d) => STAGE_INFO[d][0]).join(" · ") || "尚未執行";
+      : st === "error" ? "上次執行出錯" : (p.done || []).length ? `已完成到「${STAGE_INFO[p.done.at(-1)][0]}」` : "還沒開始處理";
     return `<li data-id="${esc(p.id)}" class="${S.cur?.id === p.id ? "sel" : ""}"><div class="pn" title="${esc(p.name)}">${esc(p.name)}</div>
       <div class="ps">${p.duration ? fmt(p.duration).slice(0, -4) + " · " : ""}${esc(lab)}</div></li>`;
   }).join("") || `<li class="muted small">還沒有專案</li>`;
@@ -86,6 +87,8 @@ async function selectProject(id) {
   $("#empty").hidden = true;
   $("#workspace").hidden = false;
   $("#projName").textContent = meta.name;
+  $("#hdrProject").textContent = meta.name;
+  $(".views").hidden = false;
   $("#projMedia").textContent = meta.media;
   const src = `/api/projects/${encodeURIComponent(id)}/media`;
   exitPreview();
@@ -127,7 +130,7 @@ function renderStatus(m) {
   log.textContent = (m.log || []).join("\n");
   if (atBottom) log.scrollTop = log.scrollHeight;
   const u = m.usage;
-  $("#costBadge").textContent = u ? `Gemini 花費約 $${u.usd.toFixed(3)}` : "";
+  $("#costBadge").textContent = u ? `本專案 Gemini 花費約 US$${u.usd.toFixed(2)}` : "";
   $$(".stage").forEach((el) => el.classList.toggle("cur", running && el.querySelector("input").value === st.stage));
 }
 
@@ -896,5 +899,10 @@ function refreshPreview() {  // plan edited while previewing → rebuild the tim
   reelSeek(Math.min(rt, reelTotal(S.seq)));
   if (wasPlaying) video.play().catch(() => {});
 }
+
+window.addEventListener("hashchange", () => {  // links like #<project id> open that project
+  const id = decodeURIComponent(location.hash.slice(1));
+  if (id && id !== S.cur?.id) selectProject(id);
+});
 
 boot();
