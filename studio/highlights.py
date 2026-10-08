@@ -215,6 +215,69 @@ def sentence_units(p: Project, cues: list[dict]) -> list[dict]:
     return out
 
 
+def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str, cues: list[dict], cuts, dur) -> dict:
+    """Paper edit → rough cut → watch: render the draft as a low-res reel (no overlays), let Gemini watch it with
+    a map of which sentences sit where, and return a corrected plan — still in sentence ids, so the exact cuts
+    are recomputed from word timings + loudness afterwards."""
+    from .pipeline import media_has_video
+    parts = [("HOOK", r) for r in data.get("hook") or []] + \
+        [(f"CHAPTER {ch.get('title', '')}", r) for ch in data.get("chapters", []) for r in ch.get("clips", [])]
+    pieces, cmap, off = [], [], 0.0
+    for name, r in parts:
+        ua, ub = by_k.get(r.get("from")), by_k.get(r.get("to"))
+        if not ua or not ub or ua["k"] > ub["k"]:
+            continue
+        s, e = cuts[0][ua["a"]], cuts[1][ub["b"]]
+        pieces.append((s, e))
+        text = " ".join(by_k[k]["text"] for k in range(ua["k"], ub["k"] + 1) if k in by_k)
+        cmap.append(f"{fmt_mmss(off)}–{fmt_mmss(off + e - s)}  {name}  sentences {ua['k']}–{ub['k']}: {text}")
+        off += e - s
+    if not pieces:
+        return data
+    work = p.dir / "highlights" / "_roughcut"
+    work.mkdir(parents=True, exist_ok=True)
+    out = work / "rough.mp4"
+    has_video = media_has_video(p)
+    args, fc, cat = [], "", ""
+    for i, (a, b) in enumerate(pieces):
+        args += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media)]
+        if has_video:
+            fc += f"[{i}:v]setpts=PTS-STARTPTS,scale=-2:360,fps=10,format=yuv420p,setsar=1[v{i}];"
+        fc += f"[{i}:a]asetpts=PTS-STARTPTS,aresample=44100,afade=t=in:d=0.03,afade=t=out:st={max(0, b - a - 0.06):.3f}:d=0.06[a{i}];"
+        cat += (f"[v{i}]" if has_video else "") + f"[a{i}]"
+    fc += f"{cat}concat=n={len(pieces)}:v={1 if has_video else 0}:a=1" + ("[v][a]" if has_video else "[a]")
+    vmap = ["-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30"] if has_video else []
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", fc, *vmap, "-map", "[a]",
+                    "-c:a", "aac", "-b:a", "64k", str(out)], check=True)
+    mime = "video/mp4" if has_video else "audio/mp4"
+    p.log(f"  看粗剪複查：上傳粗剪 {off:.0f} 秒（{out.stat().st_size / 1e6:.1f} MB）")
+    f = gemini.upload_file(out, mime, log=p.log)
+    try:
+        system = ("You are the senior editor reviewing the ROUGH CUT of a highlight reel before it is approved. You "
+                  "WATCH the rough cut (attached) — not just read it.\n" + rules +
+                  "\nWatch it as a viewer would and check every clip: does it start where a thought starts and does "
+                  "every explanation actually finish; does anything end mid-thought or on the other speaker starting "
+                  "a question; how is the delivery (energy, emotion, a laugh, an awkward pause, a weak or mumbled "
+                  "moment); do the jump cuts feel abrupt (picture jumps, voice tone jumps); does the reel flow and "
+                  "build? Fix problems by extending / trimming clips by whole sentences (use the FULL TRANSCRIPT to "
+                  "reach material outside the cut), replacing a weak take with a better-delivered sentence, "
+                  "reordering, or dropping a clip. Keep what already works. Return the full corrected plan in the "
+                  "same format — sentence ids only, never timestamps.")
+        prompt = ("ROUGH CUT MAP (time in the attached rough cut → what it contains):\n" + "\n".join(cmap) +
+                  f"\n\nTotal {off:.0f}s.\n\nFULL TRANSCRIPT (sentence id, start, length, speaker: text):\n" + script)
+        fixed, _ = gemini.generate_json(p.options["text_model"],
+                                        [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": prompt}],
+                                        system=system, schema=PLAN_SCHEMA, low_res=True, usage=p.usage, log=p.log,
+                                        max_tokens=32768)
+    finally:
+        gemini.delete_file(f["name"])
+        out.unlink(missing_ok=True)
+    if fixed.get("chapters"):
+        p.log(f"  看粗剪複查：{dur(data):.0f} 秒 → {dur(fixed):.0f} 秒")
+        return fixed
+    return data
+
+
 def plan_highlight(p: Project, req: dict) -> str:
     o = p.options
     cues = cues_of(p)
@@ -261,33 +324,14 @@ def plan_highlight(p: Project, req: dict) -> str:
                 tot += max(0.0, ub["end"] - ua["start"])
         return tot
 
-    if req.get("review", True):  # second pass: read the cut as a script, fix clips that don't close
-        cut = []
-        for name, rs in [("HOOK", data.get("hook") or [])] + [(f"CHAPTER {ch.get('title', '')}", ch.get("clips", []))
-                                                              for ch in data.get("chapters", [])]:
-            cut.append(f"## {name}")
-            for r in rs:
-                ua, ub = by_k.get(r.get("from")), by_k.get(r.get("to"))
-                if ua and ub:
-                    cut.append(f"[{ua['k']}–{ub['k']}] " + " ".join(by_k[k]["text"] for k in range(ua["k"], ub["k"] + 1)
-                                                                    if k in by_k))
-        review_sys = ("You are the senior editor reviewing a highlight-reel cut before it is approved.\n" + rules +
-                      "\nRead the CURRENT CUT as a viewer would. For every clip check: does it start where a thought "
-                      "starts, does every explanation actually finish, does anything end mid-thought or on the other "
-                      "speaker starting a question, does the reel flow? Fix problems by extending / trimming clips "
-                      "by whole sentences, splitting out a stray sentence, or dropping a clip. Keep what already "
-                      "works. Return the full corrected plan in the same format (sentence ids).")
-        prompt = f"CURRENT CUT ({dur(data):.0f}s):\n" + "\n".join(cut) + "\n\nFULL TRANSCRIPT:\n" + script
-        try:
-            fixed, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=review_sys,
-                                            schema=PLAN_SCHEMA, usage=p.usage, log=p.log, max_tokens=32768)
-            if fixed.get("chapters"):
-                p.log(f"  剪輯複查：{dur(data):.0f} 秒 → {dur(fixed):.0f} 秒")
-                data = fixed
-        except Exception as e:
-            p.log(f"  剪輯複查失敗，沿用初稿：{e}")
-
     cuts = cut_points(p, cues)
+    draft = data
+    if req.get("review", True):  # second pass: the editor WATCHES a rough cut of the draft and fixes it
+        try:
+            data = review_rough_cut(p, data, by_k, script, rules, cues, cuts, dur)
+        except Exception as e:
+            p.log(f"  看粗剪複查失敗，沿用初稿：{e}")
+
 
     def clips(raw):
         out = []
@@ -306,7 +350,8 @@ def plan_highlight(p: Project, req: dict) -> str:
             "created": time.time(), "hook": clips(data.get("hook", [])) if req.get("hook", True) else [],
             "chapters": [{"title": ch.get("title", ""), "title_en": ch.get("title_en", ""), "clips": clips(ch["clips"])}
                          for ch in data.get("chapters", [])],
-            "options": {"cards": bool(use_chapters), "zoom": bool(req.get("zoom", True))}}
+            "options": {"cards": bool(use_chapters), "zoom": bool(req.get("zoom", True))},
+            "draft": draft if draft is not data else None}  # paper-edit draft kept to compare with the review
     plan["chapters"] = [ch for ch in plan["chapters"] if ch["clips"]]
     if not plan["chapters"]:
         raise RuntimeError("Gemini 沒有挑出任何片段，換個描述再試一次")
