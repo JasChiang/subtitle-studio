@@ -86,7 +86,7 @@ async function selectProject(id) {
   $("#projName").textContent = meta.name;
   $("#projMedia").textContent = meta.media;
   const src = `/api/projects/${encodeURIComponent(id)}/media`;
-  S.seq = null;
+  exitPreview();
   if (video.dataset.src !== src) { video.src = src; video.dataset.src = src; }
   $("#karaoke").checked = !!({ ...S.defaults.options, ...(meta.options || {}) }).karaoke;
   renderStages();
@@ -359,7 +359,7 @@ $("#karaoke").addEventListener("change", async (e) => {  // shared with the high
 $("#onlyChanged").addEventListener("change", applyFilter);
 
 // ───────── playback sync
-function seek(t) { video.currentTime = Math.max(0, t); }
+function seek(t) { exitPreview(); video.currentTime = Math.max(0, t); }  // back to the source timeline
 function findCue(t) {
   let lo = 0, hi = S.cues.length - 1, ans = -1;
   while (lo <= hi) {
@@ -467,12 +467,12 @@ document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); if (S.cur) saveCues(); return; }
   if (!e.altKey || !S.cur) return;
   const row = S.active >= 0 ? S.active : S.focusRow;
-  if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+  if (e.code === "Space") { e.preventDefault(); S.seq ? $("#rbPlay").click() : video.paused ? video.play() : video.pause(); }
   else if (e.code === "BracketLeft" && row != null && S.cues[row]) { e.preventDefault(); S.cues[row].start = video.currentTime; rerenderRow(row); setDirty(); markOverlaps(); }
   else if (e.code === "BracketRight" && row != null && S.cues[row]) { e.preventDefault(); S.cues[row].end = video.currentTime; rerenderRow(row); setDirty(); markOverlaps(); }
   else if (e.code === "KeyS" && row != null && S.cues[row]) { e.preventDefault(); splitAt(row, video.currentTime); }
-  else if (e.code === "ArrowLeft") { e.preventDefault(); seek(video.currentTime - 2); }
-  else if (e.code === "ArrowRight") { e.preventDefault(); seek(video.currentTime + 2); }
+  else if (e.code === "ArrowLeft") { e.preventDefault(); S.seq ? reelSeek(Math.max(0, reelTime() - 2)) : seek(video.currentTime - 2); }
+  else if (e.code === "ArrowRight") { e.preventDefault(); S.seq ? reelSeek(reelTime() + 2) : seek(video.currentTime + 2); }
 });
 window.addEventListener("beforeunload", (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ""; } });
 
@@ -547,7 +547,7 @@ async function refreshExtras() {
   if (S.openNewestPlan && S.plans?.length) {
     S.openNewestPlan = false;
     await openPlan(S.plans[0].id);
-    S.seq = { pieces: seqPieces(), i: -1 }; seqNext(); video.pause();  // first shot ready in the top player
+    enterPreview(0, false);  // the edit is cued up in the top player, paused at 00:00
     return;
   }
   if (S.plan && !S.planDirty) openPlan(S.plan.id);
@@ -656,6 +656,7 @@ function renderPlan() {
 const clipsOf = (ci) => ci < 0 ? S.plan.hook : S.plan.chapters[ci].clips;
 function planChanged() {
   S.planDirty = true;
+  refreshPreview();
   $("#plDur").textContent = planDur(S.plan).toFixed(1) + " 秒（未存檔）";
 }
 $("#hlEdit").addEventListener("input", (e) => {  // subtitle edits inside the plan → the project's cues
@@ -681,7 +682,7 @@ $("#hlEdit").addEventListener("change", (e) => {
 });
 $("#hlEdit").addEventListener("click", async (e) => {
   const a = e.target.dataset.a, id = e.target.id;
-  if (id === "plPreview") return playSeq();
+  if (id === "plPreview") return enterPreview(0, true);
   if (id === "plSave") return savePlan();
   if (id === "plRender") {
     if (!needIdle()) return;
@@ -692,7 +693,10 @@ $("#hlEdit").addEventListener("click", async (e) => {
   const row = e.target.closest(".clip");
   if (!row || !a) return;
   const ci = +row.dataset.ci, k = +row.dataset.k, list = clipsOf(ci);
-  if (a === "play") { const all = seqPieces(); S.seq = { pieces: all.filter((p) => p.ci === ci && p.k === k), i: -1 }; return seqNext(); }
+  if (a === "play") {  // move the reel playhead to this clip
+    const idx = seqPieces().findIndex((p) => p.ci === ci && p.k === k);
+    return enterPreview(Math.max(0, idx), true);
+  }
   if (a === "del") list.splice(k, 1);
   if (a === "up" && k > 0) [list[k - 1], list[k]] = [list[k], list[k - 1]];
   if (a === "down" && k < list.length - 1) [list[k + 1], list[k]] = [list[k], list[k + 1]];
@@ -713,30 +717,85 @@ function seqPieces() {  // same timeline as highlights.timeline()
     ch.clips.forEach((c, k) => pieces.push({ ...c, ci, k, first: k === 0, chapterDur, title: ch.title, title_en: ch.title_en,
       cards: o.cards !== false, zoom: o.zoom !== false && k % 2 ? ZOOM : 1 }));
   });
+  let off = 0;
+  pieces.forEach((p) => { p.off = off; off += p.end - p.start; });
   return pieces;
 }
-function playSeq() {
-  S.seq = { pieces: seqPieces(), i: -1 };
-  seqNext();
+
+// ───────── reel preview mode: the player shows the highlight's own timeline
+// reel time rt ↔ (piece i, source time pieces[i].start + rt - pieces[i].off)
+function reelTotal(q) { const l = q.pieces.at(-1); return l ? l.off + l.end - l.start : 0; }
+function reelTime() {
+  const q = S.seq, pc = q?.pieces[q.i];
+  return pc ? pc.off + Math.min(Math.max(video.currentTime - pc.start, 0), pc.end - pc.start) : 0;
+}
+function enterPreview(startPiece = 0, play = true) {
+  if (!S.plan) return;
+  const pieces = seqPieces();
+  if (!pieces.length) return;
+  S.seq = { pieces, i: -1 };
+  video.controls = false;
+  $("#reelBar").hidden = false;
+  const total = reelTotal(S.seq);
+  $("#rbRange").max = total;
+  $("#rbMarks").innerHTML = pieces.filter((p) => p.first || (p.ci < 0 && p.k === 0)).map((p) =>
+    `<span style="left:${(p.off / total) * 100}%" data-t="${esc(p.ci < 0 ? "hook" : p.title || "")}"></span>`).join("");
+  seqGo(Math.min(startPiece, pieces.length - 1), 0);
+  play ? video.play().catch(() => {}) : video.pause();
+}
+function exitPreview() {
+  if (!S.seq) return;
+  S.seq = null;
+  video.pause();
+  video.controls = true;
+  $("#reelBar").hidden = true;
+  $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
+  video.style.transform = video.style.filter = "";
+}
+function seqGo(i, within) {
+  const q = S.seq, pc = q.pieces[i];
+  q.i = i;
+  q.ended = false;
+  video.currentTime = pc.start + within;
+  $("#rbLabel").textContent = `${i + 1}/${q.pieces.length}｜${pc.ci < 0 ? "開頭 hook" : pc.title || ""}`;
+  $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
+  $(`#hlEdit .clip[data-ci="${pc.ci}"][data-k="${pc.k}"]`)?.classList.add("playing");
 }
 function seqNext() {
   const q = S.seq;
-  q.i++;
-  $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
-  if (q.i >= q.pieces.length) { video.pause(); S.seq = null; $("#seqBanner").hidden = true; return; }
-  const pc = q.pieces[q.i];
-  $("#seqBanner").hidden = false;
-  $("#seqBanner").textContent = `預覽剪輯 ${q.i + 1}/${q.pieces.length}` + (pc.title ? `｜${pc.title}` : "｜開頭 hook");
-  $(`#hlEdit .clip[data-ci="${pc.ci}"][data-k="${pc.k}"]`)?.classList.add("playing");
-  seek(pc.start);
-  video.play();
+  if (q.i + 1 < q.pieces.length) return seqGo(q.i + 1, 0);
+  video.pause();  // end of the reel: stop here, like an editor's program monitor
+  q.ended = true;
 }
 function seqTick(t) {
   const q = S.seq;
-  if (!q || q.i < 0 || video.seeking) return;
-  const pc = q.pieces[q.i];
-  if (t < pc.start - 0.6 || t > pc.end + 0.6) { S.seq = null; $("#seqBanner").hidden = true; return; }  // user scrubbed away
-  if (!video.paused && t >= pc.end - 0.03) seqNext();
+  if (!q || q.i < 0) return;
+  const total = reelTotal(q), rt = q.ended ? total : reelTime();
+  if (!S.scrubbing) $("#rbRange").value = rt;
+  $("#rbTime").textContent = `${fmt(rt).slice(0, -2)} / ${fmt(total).slice(0, -2)}`;
+  $("#rbPlay").textContent = video.paused ? "▶" : "❚❚";
+  if (!video.paused && !video.seeking && t >= q.pieces[q.i].end - 0.03) seqNext();
+}
+function reelSeek(rt) {
+  const q = S.seq;
+  let i = q.pieces.findIndex((p) => rt < p.off + p.end - p.start);
+  if (i < 0) i = q.pieces.length - 1;
+  seqGo(i, Math.max(0, rt - q.pieces[i].off));
+}
+$("#rbRange").addEventListener("input", (e) => { S.scrubbing = true; reelSeek(+e.target.value); });
+$("#rbRange").addEventListener("change", () => { S.scrubbing = false; });
+$("#rbPlay").onclick = () => {
+  if (!S.seq) return;
+  if (S.seq.ended) { seqGo(0, 0); return video.play(); }
+  video.paused ? video.play() : video.pause();
+};
+$("#rbExit").onclick = exitPreview;
+function refreshPreview() {  // plan edited while previewing → rebuild the timeline, keep the playhead
+  if (!S.seq || !S.plan) return;
+  const rt = reelTime(), wasPlaying = !video.paused;
+  enterPreview(0, false);
+  reelSeek(Math.min(rt, reelTotal(S.seq)));
+  if (wasPlaying) video.play().catch(() => {});
 }
 
 boot();

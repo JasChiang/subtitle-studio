@@ -36,11 +36,17 @@
             <video id="video" controls preload="metadata"></video>
             <div id="layers" class="layers"><img id="lyCard" alt=""><img id="lyTag" alt=""><img id="lySub" alt=""></div>
           </div>
+          <div id="reelBar" class="reel-bar" hidden>
+            <button id="rbPlay" title="播放／暫停（⌥Space）">▶</button>
+            <span id="rbTime" class="mono">00:00.0 / 00:00.0</span>
+            <div class="rb-track"><div id="rbMarks"></div><input type="range" id="rbRange" min="0" max="1" step="0.01" value="0"></div>
+            <span id="rbLabel" class="small"></span>
+            <button id="rbExit">結束預覽</button>
+          </div>
           <div class="player-bar">
             <span id="timecode" class="mono">00:00.000</span>
             <label><input type="checkbox" id="follow" checked> 跟隨播放</label>
             <label><input type="checkbox" id="showOverlay" checked> 疊字幕／字卡</label>
-            <span id="seqBanner" class="reel-banner" hidden></span>
             <label title="與輸出的精華影片共用這個設定"><input type="checkbox" id="karaoke"> 逐字高亮</label>
             <span class="muted small">快速鍵：⌥Space 播放／暫停 · ⌥[ ⌥] 設定入／出點 · ⌥S 在播放點切開 · ⌘S 存檔</span>
           </div>
