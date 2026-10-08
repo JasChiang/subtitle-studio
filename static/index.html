@@ -76,6 +76,12 @@
         </div>
       </div>
 
+      <div class="views">
+        <button data-view="subs" class="active">字幕</button>
+        <button data-view="summary">摘要</button>
+        <button data-view="hl">精華剪輯</button>
+      </div>
+      <div id="view-subs" class="view">
       <div class="toolbar">
         <button id="saveBtn">存檔</button>
         <span id="dirty" class="dirty" hidden>● 未存檔</span>
@@ -96,6 +102,35 @@
           <thead><tr><th>#</th><th>入點</th><th>出點</th><th>原文</th><th>譯文</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+      </div>
+
+      <div id="view-summary" class="view scroll" hidden>
+        <div class="toolbar">
+          <input id="sumNote" class="grow" placeholder="額外要求（選填），例：語氣輕鬆一點、貼文給 Threads 用">
+          <button id="sumBtn" class="primary">產生摘要</button>
+          <a class="btn" id="sumMd">下載 Markdown</a>
+          <button id="sumChapters">複製 YouTube 章節</button>
+        </div>
+        <div id="sumBody" class="sum"></div>
+      </div>
+
+      <div id="view-hl" class="view scroll" hidden>
+        <div class="hl-grid">
+          <div class="hl-form">
+            <h4>新增剪輯企劃</h4>
+            <label>想剪哪些內容（選填，留空由 AI 挑最精彩的）</label>
+            <textarea id="hlFocus" rows="3" placeholder="例：他解釋 AI 技術原理、展現專業的段落；或：所有談到家庭的部分"></textarea>
+            <div class="row gap"><label>目標長度（秒）<input id="hlSecs" type="number" value="90" min="10" step="5" style="width:80px"></label></div>
+            <label class="row gap"><input type="checkbox" id="hlChapters" checked> 分章節（章節字卡＋左上標籤）</label>
+            <label class="row gap"><input type="checkbox" id="hlHook" checked> 開頭放一句 hook</label>
+            <label class="row gap"><input type="checkbox" id="hlZoom" checked> 跳剪時交替放大遮接點</label>
+            <button id="hlPlanBtn" class="primary">產生剪輯企劃</button>
+            <h4>企劃清單</h4>
+            <div id="hlList" class="hl-list"></div>
+          </div>
+          <div class="hl-edit" id="hlEdit"><p class="muted">選一個企劃，或在左邊產生新的。</p></div>
+        </div>
       </div>
     </section>
   </main>

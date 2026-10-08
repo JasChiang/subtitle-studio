@@ -1,6 +1,6 @@
 # Subtitle Studio
 
-本機 web GUI 字幕工作台：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，並能在瀏覽器裡對著影片逐條修字幕、匯出 SRT／VTT。
+本機 web GUI 字幕工作台：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，並能在瀏覽器裡對著影片逐條修字幕、匯出 SRT／VTT；字幕完成後還能產生**影片摘要**，以及依你指定的主題**剪出精華短片**（章節字卡、跳剪、雙語字幕）。
 
 兩個設計原則：
 
@@ -18,7 +18,7 @@
 ## 安裝與啟動
 
 ```bash
-./setup.sh          # 編譯 bin/apple-asr、從 .env.example 建立 .env
+./setup.sh          # 編譯 bin/apple-asr 與 bin/text-render、從 .env.example 建立 .env
 # 編輯 .env：GEMINI_API_KEY=...
 ./run.sh            # 啟動伺服器並開啟 http://127.0.0.1:8765（PORT=xxxx ./run.sh 可換埠）
 ```
@@ -56,6 +56,18 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 - 字相同、或一對一替換的字，沿用 ASR 原本的時間；多出或缺少的字，在對應的 ASR 區間或空隙內依字數分配時間。
 - 用視窗而不是逐段對齊，是因為 LLM 偶爾會把字搬到相鄰段落，即使 prompt 禁止。整個視窗一起比對，被搬走的字仍會落回正確的時間點。
 - 語意斷句：每段約「每段分鐘數」長，切在最長的停頓上，不會切斷句子；Gemini 只拿到「一行大約幾個字元好讀」這個參考，其餘照說話的節奏、停頓與語意自行判斷。關掉 `semantic_breaks` 或 Gemini 失敗時，改用規則斷句（標點、停頓、長度）。
+
+## 摘要與精華剪輯（字幕完成後）
+
+**摘要**分頁：Gemini 讀整份字幕，產生標題、一句話簡介、摘要、帶時間碼的章節、重點、金句（原文＋譯文）和社群貼文。點時間碼可以跳到影片該處；可下載 Markdown，或一鍵複製 YouTube 章節格式。
+
+**精華剪輯**分頁：
+1. 輸入想剪的內容（例如「他解釋技術原理的段落」，留空就由 AI 挑最精彩的）、目標秒數，選擇是否分章節、開頭放 hook、跳剪時放大。
+2. Gemini 依字幕挑出片段並分章節，產生**剪輯企劃**。片段的切點會落在字與字之間的空隙，不會切到半個字。
+3. 在企劃裡可以改章節標題、調整每段入／出點、上下移動、刪除；按「▶ 預覽整支」會在播放器依序播放，不必先輸出。
+4. 按「輸出影片」產生 MP4，並附上精華影片時間軸的字幕 SRT。
+
+輸出方式：ffmpeg 負責剪接與編碼（有 `h264_videotoolbox` 時使用 Apple 硬體編碼）；字幕、章節字卡、左上標籤由 `bin/text-render`（Swift／AppKit，系統字型蘋方）畫成透明 PNG 再疊上，所以一般的 `brew install ffmpeg` 就夠，不需要含 libass 的特殊版本。章節開頭 1.7 秒會用模糊背景＋字卡轉場，聲音不中斷。
 
 ## 編輯器
 
@@ -97,7 +109,9 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 
 ```
 asr/main.swift        Apple SpeechTranscriber CLI → 字級時間 JSON（stderr 回報進度）
+render/main.swift     字幕／章節字卡／標籤 → 透明 PNG（系統字型）
 studio/pipeline.py    各步驟、對齊、斷句、匯出
+studio/highlights.py  摘要、精華剪輯企劃、精華影片輸出
 studio/gemini.py      Gemini REST（File API 上傳、JSON schema 輸出、遇暫時性錯誤時換模型）
 studio/server.py      標準函式庫 HTTP server（API、支援 Range 的影片串流、背景執行）
 studio/cli.py         無介面執行

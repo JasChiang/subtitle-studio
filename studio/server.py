@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import pipeline
+from . import highlights, pipeline
 
 ROOT = pipeline.ROOT
 PROJECTS = ROOT / "projects"
@@ -67,6 +67,28 @@ def start_run(p: pipeline.Project, stages: list[str]):
     th = threading.Thread(target=work, daemon=True)
     RUNNING[pid] = th
     th.start()
+
+
+def start_task(p: pipeline.Project, stage: str, fn):
+    """Run one non-pipeline job (summary / highlight plan / render) in the background with status + log."""
+    pid = p.dir.name
+    if pid in RUNNING and RUNNING[pid].is_alive():
+        raise RuntimeError("這個專案正在執行中")
+    m = p.meta
+    p.update(usage_base={"usd": (m.get("usage") or {}).get("usd", 0)})
+
+    def work():
+        p.status(state="running", stage=stage, progress=0, error=None)
+        try:
+            fn()
+            p.status(state="done", stage=None, progress=1)
+        except Exception as e:
+            traceback.print_exc()
+            p.log(f"✗ {e}")
+            p.status(state="error", error=str(e))
+
+    RUNNING[pid] = threading.Thread(target=work, daemon=True)
+    RUNNING[pid].start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -211,6 +233,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(p.read("reference.json") or {})
             if sub == "media":
                 return self.send_file(p.media)
+            if sub == "summary":
+                s = p.read("summary.json")
+                if q.get("format", [""])[0] == "md" and s:
+                    return self.send_text(highlights.summary_markdown(s), f"{Path(p.meta['name']).stem}.摘要.md",
+                                          "text/markdown; charset=utf-8")
+                return self.send_json(s or {})
+            if sub == "highlights":
+                if len(parts) == 4:
+                    return self.send_json(highlights.list_plans(p))
+                hid = parts[4]
+                if not re.fullmatch(r"[\w-]+", hid):
+                    raise KeyError
+                if len(parts) == 5:
+                    plan = p.read(f"highlights/{hid}.json")
+                    if not plan:
+                        raise KeyError
+                    return self.send_json(plan)
+                f = p.dir / "highlights" / f"{hid}.{'srt' if parts[5] == 'srt' else 'mp4'}"
+                if not f.exists():
+                    raise KeyError
+                name = f"{Path(p.meta['name']).stem}.精華.{hid}{f.suffix}"
+                if parts[5] == "download" or parts[5] == "srt":
+                    return self.send_file(f, download_name=name)
+                return self.send_file(f)
             if sub == "export":
                 kind = q.get("kind", ["bi"])[0]
                 cues = (p.read("cues.json") or {"cues": []})["cues"]
@@ -244,10 +290,26 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(chunk)
                     left -= len(chunk)
             return self.send_json({"path": str(dest)})
+        if parts[:2] == ["api", "projects"] and len(parts) >= 5 and parts[3] == "highlights":
+            p = project(parts[2])
+            hid = parts[4]
+            b = self.body_json()
+            if len(parts) == 5:
+                return self.send_json(highlights.save_plan(p, hid, b))
+            if parts[5] == "render":
+                start_task(p, "render", lambda: highlights.render_highlight(p, hid))
+                return self.send_json({"ok": True})
+            raise KeyError
         if parts[:2] == ["api", "projects"] and len(parts) == 4:
             p = project(parts[2])
             sub = parts[3]
             b = self.body_json()
+            if sub == "summary":
+                start_task(p, "summary", lambda: highlights.summarize(p, b))
+                return self.send_json({"ok": True})
+            if sub == "highlights":
+                start_task(p, "highlight", lambda: highlights.plan_highlight(p, b))
+                return self.send_json({"ok": True})
             if sub == "options":
                 m = p.meta
                 m["options"] = {**m.get("options", {}), **b}

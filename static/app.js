@@ -15,6 +15,7 @@ const STAGE_INFO = {
   correct: ["校正", "用參考稿修正 ASR 文字（不動時間碼）"],
   cues: ["斷句", "對齊回字級時間碼，依語意切成字幕條"],
   translate: ["翻譯", "逐條翻譯"],
+  summary: ["摘要", ""], highlight: ["剪輯企劃", ""], render: ["輸出精華影片", ""],
 };
 const OPT_FIELDS = [
   ["locale", "ASR 語言", "locale"], ["context", "影片脈絡（選填）", "textarea"], ["glossary", "詞彙表（選填）", "textarea"],
@@ -91,6 +92,8 @@ async function selectProject(id) {
   renderStatus(meta);
   await loadCues();
   loadRef();
+  S.plan = null;
+  refreshExtras();
   refreshProjects();
   startPolling();
 }
@@ -136,6 +139,7 @@ function startPolling() {
     S.cur = m;
     renderStatus(m);
     if (doneChanged) renderStages();
+    if (wasRunning && !running) refreshExtras();
     if (wasRunning && (!running || doneChanged)) {
       if (!S.dirty) await loadCues();
       loadRef();
@@ -358,6 +362,7 @@ function findCue(t) {
 let lastOv = "";
 function tick() {
   const t = video.currentTime;
+  seqTick(t);
   $("#timecode").textContent = fmt(t);
   if (S.stopAt != null && t >= S.stopAt) { video.pause(); S.stopAt = null; }
   const i = findCue(t);
@@ -467,5 +472,172 @@ $("#createBtn").onclick = async (e) => {
     selectProject(p.id);
   } catch (err) { $("#newErr").textContent = err.message; }
 };
+
+// ───────── views
+$$(".views button").forEach((b) => b.onclick = () => {
+  $$(".views button").forEach((x) => x.classList.toggle("active", x === b));
+  $$(".view").forEach((v) => v.hidden = v.id !== "view-" + b.dataset.view);
+});
+const pidURL = () => `/api/projects/${encodeURIComponent(S.cur.id)}`;
+async function refreshExtras() {
+  if (!S.cur) return;
+  loadSummary();
+  await loadPlans();
+  if (S.plan) openPlan(S.plan.id);
+}
+function needIdle() {
+  if (S.cur.running || S.cur.status?.state === "running") { alertBox("目前有工作在執行，等它跑完再試"); return false; }
+  return true;
+}
+async function startTask(path, body) {
+  try {
+    await api(pidURL() + path, { method: "POST", body });
+    S.cur.running = true;
+    startPolling();
+  } catch (e) { alertBox(e.message); }
+}
+
+// ───────── summary
+async function loadSummary() {
+  const s = await api(pidURL() + "/summary").catch(() => ({}));
+  S.summary = s.title ? s : null;
+  const box = $("#sumBody");
+  if (!S.summary) { box.innerHTML = `<p class="muted">還沒有摘要。按「產生摘要」，Gemini 會讀整份字幕寫標題、摘要、章節、重點、金句與社群貼文。</p>`; return; }
+  const t = (x) => `<span class="t" data-t="${x}">${fmt(x).slice(0, -4)}</span>`;
+  box.innerHTML = `<h2>${esc(s.title)}</h2><p class="logline">${esc(s.logline)}</p>
+    <h3>摘要</h3><p>${esc(s.summary)}</p>
+    <h3>章節</h3>${s.chapters.map((c) => `<div class="ch">${t(c.t)}<div><b>${esc(c.title)}</b><br><span class="muted small">${esc(c.summary)}</span></div></div>`).join("")}
+    <h3>重點</h3><ul>${s.takeaways.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+    <h3>金句</h3>${s.quotes.map((q) => `<div class="q">${t(q.t)} “${esc(q.text)}”<div class="tr">${esc(q.tr)}</div></div>`).join("")}
+    <h3>社群貼文</h3><pre>${esc(s.social_post)}</pre>`;
+}
+$("#sumBody").addEventListener("click", (e) => { if (e.target.dataset.t) { seek(+e.target.dataset.t); video.play(); } });
+$("#sumBtn").onclick = () => { if (needIdle()) startTask("/summary", { note: $("#sumNote").value }); };
+$("#sumMd").onclick = (e) => { e.preventDefault(); if (S.summary) location.href = pidURL() + "/summary?format=md"; };
+$("#sumChapters").onclick = async () => {
+  if (!S.summary) return;
+  await navigator.clipboard.writeText(S.summary.chapters.map((c) => `${fmt(c.t).slice(0, -4)} ${c.title}`).join("\n"));
+  $("#sumChapters").textContent = "已複製 ✓"; setTimeout(() => $("#sumChapters").textContent = "複製 YouTube 章節", 1200);
+};
+
+// ───────── highlights
+async function loadPlans() {
+  S.plans = await api(pidURL() + "/highlights").catch(() => []);
+  $("#hlList").innerHTML = S.plans.map((p) => `<div data-id="${esc(p.id)}" class="${S.plan?.id === p.id ? "sel" : ""}">
+      <b>${esc(p.title || p.id)}</b><div class="meta">${Math.round(p.duration || 0)} 秒${p.rendered ? " · 已輸出" : ""} · ${esc((p.request?.focus || "AI 自選").slice(0, 30))}</div></div>`).join("")
+    || `<p class="muted small">還沒有企劃</p>`;
+}
+$("#hlList").addEventListener("click", (e) => { const d = e.target.closest("[data-id]"); if (d) openPlan(d.dataset.id); });
+$("#hlPlanBtn").onclick = () => {
+  if (!needIdle()) return;
+  startTask("/highlights", { focus: $("#hlFocus").value, seconds: +$("#hlSecs").value || 90,
+    chapters: $("#hlChapters").checked, hook: $("#hlHook").checked, zoom: $("#hlZoom").checked });
+};
+async function openPlan(id) {
+  S.plan = await api(pidURL() + "/highlights/" + encodeURIComponent(id)).catch(() => null);
+  S.planDirty = false;
+  $$("#hlList [data-id]").forEach((d) => d.classList.toggle("sel", d.dataset.id === id));
+  renderPlan();
+}
+const byId = (id) => S.cues.find((c) => c.id === id);
+function clipText(c) {
+  const cs = S.cues.filter((x) => x.end > c.start + 0.05 && x.start < c.end - 0.05);
+  return { src: cs.map((x) => x.text).join(" "), tr: cs.map((x) => x.tr || "").join(" ") };
+}
+function planDur(pl) {
+  const d = (cs) => cs.reduce((a, c) => a + c.end - c.start, 0);
+  return d(pl.hook || []) + pl.chapters.reduce((a, ch) => a + d(ch.clips), 0);
+}
+function clipRow(c, ci, k) {
+  const tx = clipText(c);
+  return `<div class="clip" data-ci="${ci}" data-k="${k}">
+    <button data-a="play" title="預覽這段">▶</button>
+    <input value="${fmt(c.start)}" data-f="start"><input value="${fmt(c.end)}" data-f="end">
+    <div class="txt">${esc(tx.src)}<div class="tr">${esc(tx.tr)}</div>${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}</div>
+    <div><button data-a="up" title="上移">↑</button><button data-a="down" title="下移">↓</button><button data-a="del" title="刪除">✕</button></div></div>`;
+}
+function renderPlan() {
+  const pl = S.plan, box = $("#hlEdit");
+  if (!pl) { box.innerHTML = `<p class="muted">選一個企劃，或在左邊產生新的。</p>`; return; }
+  const r = pl.rendered;
+  box.innerHTML = `<div class="hl-bar"><input class="title" id="plTitle" value="${esc(pl.title || "")}">
+      <span id="plDur" class="muted">${planDur(pl).toFixed(1)} 秒</span>
+      <button id="plPreview">▶ 預覽整支</button><button id="plSave">存檔</button>
+      <button id="plRender" class="primary">輸出影片</button></div>
+    <div class="muted small">要求：${esc(pl.request?.focus || "AI 自選最精彩段落")}｜目標 ${pl.request?.seconds || "?"} 秒。預覽在上方播放器播放；調整入／出點可以直接改時間，或在字幕分頁找到時間後填進來。</div>
+    ${(pl.hook || []).length ? `<div class="chap"><b>開頭 hook</b>${pl.hook.map((c, k) => clipRow(c, -1, k)).join("")}</div>` : ""}
+    ${pl.chapters.map((ch, ci) => `<div class="chap"><div class="chap-head">
+        <input data-ci="${ci}" data-f="title" value="${esc(ch.title)}" placeholder="章節標題">
+        <input data-ci="${ci}" data-f="title_en" value="${esc(ch.title_en || "")}" placeholder="English title">
+        <button data-ci="${ci}" data-a="delch" title="刪除整章">✕ 章</button></div>
+        ${ch.clips.map((c, k) => clipRow(c, ci, k)).join("")}</div>`).join("")}
+    <div class="hl-out">${r ? `<p>已輸出 ${r.duration} 秒：<a class="btn" href="${pidURL()}/highlights/${pl.id}/download">下載 MP4</a>
+        <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載字幕 SRT</a></p>
+        <video controls preload="metadata" src="${pidURL()}/highlights/${pl.id}/video?ts=${r.at}"></video>` : `<p class="muted small">尚未輸出影片。</p>`}</div>`;
+}
+const clipsOf = (ci) => ci < 0 ? S.plan.hook : S.plan.chapters[ci].clips;
+function planChanged() {
+  S.planDirty = true;
+  $("#plDur").textContent = planDur(S.plan).toFixed(1) + " 秒（未存檔）";
+}
+$("#hlEdit").addEventListener("change", (e) => {
+  const f = e.target.dataset.f;
+  if (e.target.id === "plTitle") { S.plan.title = e.target.value; planChanged(); return; }
+  const row = e.target.closest(".clip");
+  if (row && (f === "start" || f === "end")) {
+    const c = clipsOf(+row.dataset.ci)[+row.dataset.k], v = parseT(e.target.value);
+    if (v == null) { e.target.value = fmt(c[f]); return; }
+    c[f] = v; e.target.value = fmt(v); planChanged(); return;
+  }
+  if (f === "title" || f === "title_en") { S.plan.chapters[+e.target.dataset.ci][f] = e.target.value; planChanged(); }
+});
+$("#hlEdit").addEventListener("click", async (e) => {
+  const a = e.target.dataset.a, id = e.target.id;
+  if (id === "plPreview") return playSeq();
+  if (id === "plSave") return savePlan();
+  if (id === "plRender") {
+    if (!needIdle()) return;
+    if (S.planDirty) await savePlan();
+    return startTask(`/highlights/${S.plan.id}/render`, {});
+  }
+  if (a === "delch") { S.plan.chapters.splice(+e.target.dataset.ci, 1); planChanged(); return renderPlan(); }
+  const row = e.target.closest(".clip");
+  if (!row || !a) return;
+  const ci = +row.dataset.ci, k = +row.dataset.k, list = clipsOf(ci);
+  if (a === "play") { S.seq = { pieces: [{ ...list[k], ci, k }], i: -1 }; return seqNext(); }
+  if (a === "del") list.splice(k, 1);
+  if (a === "up" && k > 0) [list[k - 1], list[k]] = [list[k], list[k - 1]];
+  if (a === "down" && k < list.length - 1) [list[k + 1], list[k]] = [list[k], list[k + 1]];
+  if (ci >= 0 && !list.length) S.plan.chapters.splice(ci, 1);
+  planChanged(); renderPlan(); $("#plDur").textContent = planDur(S.plan).toFixed(1) + " 秒（未存檔）";
+});
+async function savePlan() {
+  S.plan = await api(`${pidURL()}/highlights/${S.plan.id}`, { method: "POST", body: S.plan });
+  S.planDirty = false;
+  renderPlan(); loadPlans();
+}
+function playSeq() {
+  const pl = S.plan, pieces = [];
+  (pl.hook || []).forEach((c, k) => pieces.push({ ...c, ci: -1, k }));
+  pl.chapters.forEach((ch, ci) => ch.clips.forEach((c, k) => pieces.push({ ...c, ci, k, title: k === 0 ? ch.title : "" })));
+  S.seq = { pieces, i: -1 };
+  seqNext();
+}
+function seqNext() {
+  const q = S.seq;
+  q.i++;
+  $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
+  if (q.i >= q.pieces.length) { video.pause(); S.seq = null; return; }
+  const pc = q.pieces[q.i];
+  $(`#hlEdit .clip[data-ci="${pc.ci}"][data-k="${pc.k}"]`)?.classList.add("playing");
+  if (pc.title) $("#statusLine").textContent = `預覽：${pc.title}`;
+  seek(pc.start);
+  video.play();
+}
+function seqTick(t) {
+  const q = S.seq;
+  if (!q || q.i < 0 || video.paused) return;
+  if (t >= q.pieces[q.i].end - 0.03) seqNext();
+}
 
 boot();
