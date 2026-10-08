@@ -21,7 +21,7 @@ const OPT_FIELDS = [
   ["locale", "ASR 語言", "locale"], ["context", "影片脈絡（選填）", "textarea"], ["glossary", "詞彙表（選填）", "textarea"],
   ["ref_model", "參考稿模型（看影片）", "text"], ["text_model", "校正／翻譯模型", "text"],
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
-  ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
+  ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["cjk_spacing", "中文與英文／數字之間加半形空格", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字高亮（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
@@ -415,20 +415,37 @@ function showLayer(el, url) {  // swap only once the new image is decoded → no
   im.src = url;
   preloaded.add(url);
 }
+const NOSPACE = "，。、！？；：「」『』（）《》〈〉～·", CJKRE = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
+const needsSpace = (prev, tok) => !(NOSPACE.includes(prev.at(-1)) || NOSPACE.includes(tok[0]) || (CJKRE.test(prev.at(-1)) && CJKRE.test(tok[0])));
+function dialogSplit(c) {  // same as pipeline.dialog_split
+  if (c.split) return c.split;
+  const first = c.text.split("\n")[0].replace(/^- /, ""), toks = c.words.map((w) => w.t);
+  for (let k = 1; k < toks.length; k++) if (joinWords(c.words.slice(0, k)) === first) return k;
+  return toks.length;
+}
+function markedSource(c, t) {  // same as pipeline.marked_source: per-word highlight, \x01 … \x02
+  const ws = c.words;
+  const lines = c.dialog ? [ws.slice(0, dialogSplit(c)), ws.slice(dialogSplit(c))] : [ws];
+  return lines.map((line) => {
+    let plain = "", marked = "";
+    for (const w of line) {
+      const sep = plain && needsSpace(plain, w.t) ? " " : "";
+      plain += sep + w.t;
+      marked += sep + (w.s <= t + 1e-6 ? "\x01" + w.t + "\x02" : w.t);
+    }
+    return (c.dialog ? "- " : "") + marked.replaceAll("\x02 \x01", " ").replaceAll("\x02\x01", "");
+  }).join("\n");
+}
 function cueLines(c, t) {  // same rules as highlights.reel_subs
   const opts = { ...S.defaults.options, ...(S.cur?.options || {}) };
-  let src = c.text;
-  if (opts.karaoke && c.words?.length && !c.dialog) {
-    const spoken = c.words.filter((w) => w.s <= t + 1e-6);
-    if (spoken.length) { const pre = joinWords(spoken); src = pre + "\x01" + joinWords(c.words).slice(pre.length); }
-  }
+  const src = opts.karaoke && c.words?.length ? markedSource(c, t) : c.text;
   const tr = (c.tr || "").replace(/⏎/g, " ").trim();
   return !tr ? [src] : opts.sub_order === "src-first" ? [src, tr] : [tr, src];
 }
 function prefetchCue(c) {
   if (!c || !S.cur) return;
   const opts = { ...S.defaults.options, ...(S.cur.options || {}) };
-  const times = opts.karaoke && c.words?.length && !c.dialog ? [c.start - 1, ...c.words.map((w) => w.s)] : [c.start];
+  const times = opts.karaoke && c.words?.length ? [c.start - 1, ...c.words.map((w) => w.s)] : [c.start];
   times.forEach((t) => preload(overlayURL("sub", cueLines(c, t))));
 }
 let lastCue = -2;

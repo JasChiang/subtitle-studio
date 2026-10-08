@@ -70,6 +70,10 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 
 預覽與輸出一致：字幕、字卡、標籤都由同一支 `bin/text-render`（Swift／AppKit，系統字型蘋方）畫成透明 PNG，預覽時由伺服器即時產生（有快取），輸出時由 ffmpeg 疊上影片，所以預覽看到的就是成品的字。唯一的差別是字卡的模糊底在預覽時用瀏覽器濾鏡近似，以及影片壓縮造成的輕微邊緣柔化。一般的 `brew install ffmpeg` 就夠，有 `h264_videotoolbox` 時用 Apple 硬體編碼。
 
+## 中文排版規則
+
+中文字幕（譯文，以及中文原文）會自動在中文與英文字母／數字之間加半形空格，例如「我54歲，在AI公司」→「我 54 歲，在 AI 公司」；翻譯完成、網頁存檔、匯出時都會套用，可在設定關閉（`cjk_spacing`）。
+
 ## 編輯器
 
 | 操作 | 方式 |

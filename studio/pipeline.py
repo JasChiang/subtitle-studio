@@ -36,6 +36,7 @@ DEFAULT_OPTIONS = {
     "backchannels": "omit",        # omit | keep — listener's mm-hmm / yeah that carry no information
     "energy_snap": True,           # refine word boundaries with the audio loudness (pauses, onsets)
     "correct_with_audio": True,    # correction also listens to the audio of each chunk
+    "cjk_spacing": True,           # half-width space between CJK and Latin letters / digits in Chinese text
     "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
     "max_duration": 6.5,
     "gap_break": 0.7,
@@ -548,20 +549,21 @@ def align_window(segs: list[dict], texts: list[str], seg_offset: int = 0) -> lis
     return dst
 
 
-def unsqueeze(dst: list[dict], lo: float, hi: float, min_word: float = 0.04):
-    """Words the correction added where the ASR heard nothing get crammed into tiny gaps. Give such a run the
-    silence around it plus the tail of the previous word — but never move the START of a word the ASR timed
-    (that is what keeps subtitles and karaoke in sync). Runs that still don't fit are marked as estimated."""
+def unsqueeze(dst: list[dict], lo: float, hi: float, fast: float = 0.08):
+    """Words the correction added where the ASR heard nothing (often the quieter voice under overlapping
+    speech) get crammed into tiny gaps. A run of ≥3 words averaging under `fast` s/word is impossible speech:
+    give it the silence around it plus the tail of the previous word — never moving the START of a word the
+    ASR timed — and mark it estimated so the editor can flag it."""
     i, n = 0, len(dst)
     while i < n:
-        if dst[i]["e"] - dst[i]["s"] >= min_word:
+        if dst[i]["e"] - dst[i]["s"] >= fast:
             i += 1
             continue
         j = i
-        while j + 1 < n and dst[j + 1]["e"] - dst[j + 1]["s"] < min_word:
+        while j + 1 < n and dst[j + 1]["e"] - dst[j + 1]["s"] < fast:
             j += 1
-        if j == i:  # a single short word is normal (a, I, the)
-            i += 1
+        if j - i + 1 < 3:  # one or two short words (a, I, the) are normal speech
+            i = j + 1
             continue
         a0 = dst[i - 1]["s"] + 0.6 * (dst[i - 1]["e"] - dst[i - 1]["s"]) if i > 0 else lo
         b0 = dst[j + 1]["s"] if j + 1 < n else hi
@@ -581,6 +583,70 @@ def spread(units: list[dict], lo: float, hi: float):
         d = (hi - lo) * max(1, len(norm(u["t"]))) / total
         u["s"], u["e"] = s, s + d
         s += d
+
+
+_CJK_CH = rf"[{CJK}]"
+_LATIN_NUM = r"[A-Za-z0-9]"
+
+
+def cjk_spacing(text: str) -> str:
+    """Half-width space between CJK characters and Latin letters / digits (both directions):
+    「我54歲，在AI公司」→「我 54 歲，在 AI 公司」. Full-width punctuation is left alone."""
+    if not text:
+        return text
+    text = re.sub(rf"({_CJK_CH})({_LATIN_NUM})", r"\1 \2", text)
+    return re.sub(rf"({_LATIN_NUM})({_CJK_CH})", r"\1 \2", text)
+
+
+def apply_cjk_spacing(cues: list[dict], on: bool = True) -> int:
+    """Applies the rule to translations (and to CJK source lines). Returns how many cues changed."""
+    if not on:
+        return 0
+    n = 0
+    for c in cues:
+        for k in ("tr",) + (("text",) if is_cjk_text(c.get("text", "")) else ()):
+            v = c.get(k)
+            if v and cjk_spacing(v) != v:
+                c[k] = cjk_spacing(v)
+                n += 1
+    return n
+
+
+HL_ON, HL_OFF = "\x01", "\x02"  # karaoke markup understood by bin/text-render and the web preview
+
+
+def _needs_space(prev: str, tok: str) -> bool:
+    return not (prev[-1] in NOSPACE_PUNCT or tok[0] in NOSPACE_PUNCT or (is_cjk_char(prev[-1]) and is_cjk_char(tok[0])))
+
+
+def dialog_split(c: dict) -> int:
+    """How many of a two-speaker cue's words belong to its first line (older cues don't store it)."""
+    if c.get("split"):
+        return c["split"]
+    first = c["text"].split("\n")[0].removeprefix("- ")
+    toks = [w["t"] for w in c.get("words") or []]
+    for k in range(1, len(toks)):
+        if join_tokens(toks[:k]) == first:
+            return k
+    return len(toks)
+
+
+def marked_source(c: dict, t: float) -> str:
+    """The original-language line(s) of a cue with every word already spoken at time t wrapped in
+    HL_ON…HL_OFF. Per-word (not a prefix), so two people speaking at once each get their own highlight."""
+    ws = c.get("words") or []
+    if not ws:
+        return c["text"]
+    lines = [ws[:dialog_split(c)], ws[dialog_split(c):]] if c.get("dialog") else [ws]
+    out = []
+    for line in lines:
+        plain, marked = "", ""
+        for w in line:
+            sep = " " if plain and _needs_space(plain, w["t"]) else ""
+            plain += sep + w["t"]
+            marked += sep + (HL_ON + w["t"] + HL_OFF if w["s"] <= t + 1e-6 else w["t"])
+        out.append(("- " if c.get("dialog") else "") + marked.replace(HL_OFF + " " + HL_ON, " ").replace(HL_OFF + HL_ON, ""))
+    return "\n".join(out)
 
 
 SENT_END = tuple(".?!。？！…」")
@@ -681,6 +747,7 @@ def finalize_cues(groups: list[list[dict]]) -> list[dict]:
         text = ("- " + join_tokens([w["t"] for w in parts[i][0]]) + "\n- " + join_tokens([w["t"] for w in parts[i][1]])
                 if parts[i] else join_tokens([w["t"] for w in ws]))
         out.append({"start": round(start, 3), "end": round(end, 3), "text": text, "dialog": bool(parts[i]),
+                    **({"split": len(parts[i][0])} if parts[i] else {}),
                     "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3)} for w in ws],
                     "spk": bool(ws[0].get("spk")), "est": sum(1 for w in ws if w.get("est")) >= 2})
     return out
@@ -859,6 +926,43 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
     return [g for k in range(len(windows)) for g in result[k]]
 
 
+def reuse_lines(old_cues: list[dict], words: list[dict]):
+    """Rebuild the previous run's lines on freshly timed words when the wording is unchanged. Words that sit
+    between old cues are the backchannels that run omitted; two-speaker cues keep their split. Returns None
+    if the words no longer match (then the lines are recomputed)."""
+    if not old_cues:
+        return None
+    groups, k = [], 0
+    for c in old_cues:
+        toks = [w["t"] for w in c.get("words") or []]
+        if not toks:
+            return None
+        start = k
+        while k < len(words) and words[k]["t"] != toks[0]:
+            k += 1
+        if k > start:  # omitted backchannel(s) in between
+            g = words[start:k]
+            g[0]["line"] = {"omit": True}
+            groups.append(g)
+        if [w["t"] for w in words[k:k + len(toks)]] != toks:
+            return None
+        g = words[k:k + len(toks)]
+        if c.get("dialog"):
+            sp = dialog_split(c)
+            a, b = g[:sp], g[sp:]
+            a[0]["line"] = {"speaker": "A", "with_prev": False, "omit": False}
+            b[0]["line"] = {"speaker": "B", "with_prev": True, "omit": False}
+            groups += [a, b]
+        else:
+            groups.append(g)
+        k += len(toks)
+    if k < len(words):
+        if len(words) - k > 5:
+            return None
+        groups.append(words[k:])
+    return groups
+
+
 def stage_cues(p: Project):
     o = p.options
     asr = p.read("asr.json")
@@ -876,15 +980,9 @@ def stage_cues(p: Project):
         p.log(f"  依聲音音量校正字的邊界：{moved} 處")
     old_doc = p.read("cues.json") or {}
     old_cues = old_doc.get("cues", [])
-    reuse = o.get("reuse_breaks", True) and not old_doc.get("edited") and old_cues and \
-        not any(c.get("dialog") for c in old_cues) and \
-        [w["t"] for c in old_cues for w in (c.get("words") or [])] == [w["t"] for w in words]
-    if reuse:
-        p.log("  字詞與上次相同，沿用上次的斷句（只更新時間）")
-        groups, k = [], 0
-        for c in old_cues:
-            groups.append(words[k:k + len(c["words"])])
-            k += len(c["words"])
+    groups = reuse_lines(old_cues, words) if o.get("reuse_breaks", True) and not old_doc.get("edited") else None
+    if groups is not None:
+        p.log("  字詞與上次相同，沿用上次的斷句（含雙人字幕與省略的附和，只更新時間）")
     elif o.get("semantic_breaks", True) and words and os.environ.get("GEMINI_API_KEY"):
         groups = semantic_groups(p, words, o)
     else:
@@ -957,6 +1055,10 @@ def stage_translate(p: Project, only_missing: bool = False):
 
     with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
         list(ex.map(one, batches))
+    fixed = apply_cjk_spacing(cues, o.get("cjk_spacing", True))
+    if fixed:
+        p.write("cues.json", doc)
+        p.log(f"  中英數之間補半形空格：{fixed} 條")
     missing = sum(1 for c in cues if not c.get("tr"))
     p.log(f"翻譯完成，{len(cues) - missing}/{len(cues)} 條" + (f"（{missing} 條缺譯，可再跑一次）" if missing else ""))
 

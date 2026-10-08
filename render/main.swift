@@ -82,12 +82,17 @@ func render(_ it: Item, w: Int, h: Int) throws {
             let size = (i == 0 ? 56 : 38) * u
             let weight: NSFont.Weight = i == 0 ? .semibold : .regular
             let base: NSColor = i == 0 ? .white : pale
-            // "\u{1}" marks the karaoke split: text before it is already spoken
-            let parts = line.components(separatedBy: "\u{1}")
+            // karaoke markup: "\u{1}" starts and "\u{2}" ends a run of already-spoken words
             let s = NSMutableAttributedString()
-            for (k, part) in parts.enumerated() {
-                s.append(fill(part, size: size, weight: weight, color: parts.count > 1 && k == 0 ? spokenColor : base))
+            var run = "", lit = false
+            func flush() {
+                if !run.isEmpty { s.append(fill(run, size: size, weight: weight, color: lit ? spokenColor : base)) }
+                run = ""
             }
+            for ch in line {
+                if ch == "\u{1}" { flush(); lit = true } else if ch == "\u{2}" { flush(); lit = false } else { run.append(ch) }
+            }
+            flush()
             let hgt = height(s, width: tw)
             drawOutlined(s, in: NSRect(x: margin, y: y, width: tw, height: hgt), outline: 0.05)
             y += hgt + 6 * u
