@@ -47,6 +47,16 @@ class OtherLanguageSpans(unittest.TestCase):
         self.assertEqual(pl.other_language_spans(ref, "zh-TW", self.words), [])
 
 
+class KoreanSpacing(unittest.TestCase):
+    def test_correct_words_keep_the_asr_spacing(self):
+        asr = "그 태 태웅님이라고 불러도 될까요"
+        corrected = "그 태웅, 태웅 님이라고 불러도 될까요?"
+        self.assertEqual(pl.keep_asr_spacing(asr, corrected), "그 태웅, 태웅님이라고 불러도 될까요?")
+
+    def test_changed_words_keep_the_correctors_spacing(self):
+        self.assertEqual(pl.keep_asr_spacing("자막 어루를 소개", "자막 도구를 소개"), "자막 도구를 소개")
+
+
 class MergeReasr(unittest.TestCase):
     def test_words_inside_the_span_are_replaced(self):
         asr = {"duration": 12, "segments": [

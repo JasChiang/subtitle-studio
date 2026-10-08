@@ -45,6 +45,12 @@ class Align(unittest.TestCase):
         self.assertEqual(words[-1]["s"], 2.0)  # an ASR-timed start is never moved
 
 
+    def test_normal_japanese_characters_are_not_flagged(self):
+        words = [{"t": ch, "s": 1.0 + k * 0.08, "e": 1.08 + k * 0.08} for k, ch in enumerate("ちょっと分かりづらい")]
+        pl.unsqueeze(words, 0.0, 3.0)
+        self.assertFalse(any(w.get("est") for w in words))
+
+
 class Energy(unittest.TestCase):
     def test_pause_absorbed_into_a_word_is_moved_out(self):
         # 10 ms frames: speech 0–1.0 s, silence 1.0–1.4 s, speech 1.4–2.0 s

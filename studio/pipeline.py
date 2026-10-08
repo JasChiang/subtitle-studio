@@ -624,6 +624,31 @@ def reasr_segments(p: Project) -> int:
     return len(spans)
 
 
+def keep_asr_spacing(asr_text: str, corrected: str) -> str:
+    """Korean word spacing (띄어쓰기) is easy for the corrector to 'fix' wrongly (태웅님 → 태웅 님). Wherever the
+    corrected text has the same letters as the ASR, use the ASR's spacing; keep the corrector's spacing only
+    where it actually changed words."""
+    def split(t):
+        chars, space_before = [], []
+        pending = False
+        for ch in t:
+            if ch.isspace():
+                pending = True
+                continue
+            chars.append(ch)
+            space_before.append(pending and bool(chars[:-1]))
+            pending = False
+        return chars, space_before
+    a, sa = split(asr_text)
+    c, sc = split(corrected)
+    from difflib import SequenceMatcher
+    out_space = list(sc)
+    for blk in SequenceMatcher(None, a, c, autojunk=False).get_matching_blocks():
+        for k in range(1, blk.size):  # inside a matching run (its first char keeps the corrector's choice)
+            out_space[blk.b + k] = sa[blk.a + k]
+    return "".join((" " if sp else "") + ch for ch, sp in zip(c, out_space))
+
+
 def stage_correct(p: Project):
     o = p.options
     if o.get("reasr_segments", True) and reasr_segments(p):
@@ -650,6 +675,8 @@ def stage_correct(p: Project):
         "ASR and the REFERENCE disagree, prefer whichever is more plausible in context; the REFERENCE is "
         "usually better on names and rare words, the ASR is usually better on exact wording.\n"
         "- If the ASR clearly DROPPED words that the REFERENCE has at that moment, add them back.\n"
+        "- Only change words that are actually WRONG. Keep the ASR's word spacing (e.g. Korean 띄어쓰기) and "
+        "its formatting of numbers, dates and units (keep digits as digits) wherever the words are right.\n"
         "- Stay VERBATIM: do not paraphrase, summarize, reorder, translate, or tidy the grammar of what was "
         "said. Keep repeated words and false starts. Keep contractions and casual forms exactly as spoken "
         "(gonna, wanna, kinda, 'cause stay as they are).\n"
@@ -727,6 +754,8 @@ def stage_correct(p: Project):
             gemini.delete_file(upl["name"])
         for i in idxs:
             result[i] = got.get(i, segs[i]["text"])
+            if script_of(segs[i]["text"]) == "hangul":
+                result[i] = keep_asr_spacing(segs[i]["text"], result[i])
         with lock:
             cache.setdefault("chunks", {})[key] = {str(i): result[i] for i in idxs}
             p.write("corrected.json", cache)
@@ -818,13 +847,17 @@ def unsqueeze(dst: list[dict], lo: float, hi: float, fast: float = 0.08):
     speech) get crammed into tiny gaps. A run of ≥3 words averaging under `fast` s/word is impossible speech:
     give it the silence around it plus the tail of the previous word — never moving the START of a word the
     ASR timed — and mark it estimated so the editor can flag it."""
+    def too_fast(u):  # Chinese / Japanese tokens are single characters: ~0.06–0.12 s each is normal speech
+        limit = 0.03 if len(norm(u["t"])) == 1 and is_cjk_char(u["t"][0]) else fast
+        return u["e"] - u["s"] < limit
+
     i, n = 0, len(dst)
     while i < n:
-        if dst[i]["e"] - dst[i]["s"] >= fast:
+        if not too_fast(dst[i]):
             i += 1
             continue
         j = i
-        while j + 1 < n and dst[j + 1]["e"] - dst[j + 1]["s"] < fast:
+        while j + 1 < n and too_fast(dst[j + 1]):
             j += 1
         if j - i + 1 < 3:  # one or two short words (a, I, the) are normal speech
             i = j + 1
