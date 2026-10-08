@@ -318,7 +318,7 @@ def render_highlight(p: Project, hid: str):
     fc = fc.rstrip(";")
     out = p.dir / "highlights" / f"{hid}.mp4"
     tmp = out.with_suffix(".part.mp4")
-    enc = ["-c:v", "h264_videotoolbox", "-b:v", "10M"] if hw_encoder() else ["-c:v", "libx264", "-crf", "19",
+    enc = ["-c:v", "h264_videotoolbox", "-b:v", "8M"] if hw_encoder() else ["-c:v", "libx264", "-crf", "19",
                                                                              "-preset", "medium"]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", fc, "-map", f"[{cur}]",
            "-map", "[ac]", *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn", "-map_chapters", "-1", "-movflags", "+faststart",
@@ -356,7 +356,7 @@ def hw_encoder() -> bool:
 
 def list_plans(p: Project) -> list[dict]:
     out = []
-    for f in sorted((p.dir / "highlights").glob("*.json"), reverse=True):
+    for f in sorted((p.dir / "highlights").glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
         d = json.loads(f.read_text())
         out.append({k: d.get(k) for k in ("id", "title", "duration", "request", "rendered", "created")})
     return out
