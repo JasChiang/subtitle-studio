@@ -215,11 +215,31 @@ def sentence_units(p: Project, cues: list[dict]) -> list[dict]:
     return out
 
 
-def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str, cues: list[dict], cuts, dur) -> dict:
-    """Paper edit → rough cut → watch: render the draft as a low-res reel (no overlays), let Gemini watch it with
-    a map of which sentences sit where, and return a corrected plan — still in sentence ids, so the exact cuts
-    are recomputed from word timings + loudness afterwards."""
+def lowres_concat(p: Project, pieces: list[tuple[float, float]], out: Path, has_video: bool) -> str:
+    """Concatenate source ranges into one small 360p reel for Gemini to watch. Returns the MIME type."""
+    args, fc, cat = [], "", ""
+    for i, (a, b) in enumerate(pieces):
+        args += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media)]
+        if has_video:
+            fc += f"[{i}:v]setpts=PTS-STARTPTS,scale=-2:360,fps=10,format=yuv420p,setsar=1[v{i}];"
+        fc += (f"[{i}:a]asetpts=PTS-STARTPTS,aresample=44100,afade=t=in:d=0.03,"
+               f"afade=t=out:st={max(0, b - a - 0.06):.3f}:d=0.06[a{i}];")
+        cat += (f"[v{i}]" if has_video else "") + f"[a{i}]"
+    fc += f"{cat}concat=n={len(pieces)}:v={1 if has_video else 0}:a=1" + ("[v][a]" if has_video else "[a]")
+    vmap = ["-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30"] if has_video else []
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", fc, *vmap, "-map", "[a]",
+                    "-c:a", "aac", "-b:a", "64k", str(out)], check=True)
+    return "video/mp4" if has_video else "audio/mp4"
+
+
+def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str, cues: list[dict], cuts, dur,
+                     handle: float = 18.0) -> dict:
+    """Paper edit → rough cut → watch. Gemini watches (1) the rough cut of the draft and (2) a CONTEXT reel with
+    every clip plus `handle` seconds of source before/after it (overlaps merged), so extending or swapping a
+    sentence is judged on what it actually sounds/looks like. Answers in sentence ids only."""
     from .pipeline import media_has_video
+    units = sorted(by_k.values(), key=lambda u: u["k"])
+    duration = p.meta.get("duration") or cues[-1]["end"]
     parts = [("HOOK", r) for r in data.get("hook") or []] + \
         [(f"CHAPTER {ch.get('title', '')}", r) for ch in data.get("chapters", []) for r in ch.get("clips", [])]
     pieces, cmap, off = [], [], 0.0
@@ -234,44 +254,61 @@ def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str
         off += e - s
     if not pieces:
         return data
+    # context reel: each clip ± handle, merged where they overlap, in source order
+    spans = sorted((max(0.0, s - handle), min(duration, e + handle)) for s, e in pieces)
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1] + 1.0:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    xmap, xoff = [], 0.0
+    for a, b in merged:
+        inside = [u for u in units if u["start"] >= a - 0.5 and u["end"] <= b + 0.5]
+        ids = f"sentences {inside[0]['k']}–{inside[-1]['k']}" if inside else "no full sentences"
+        used = [f"{fmt_mmss(xoff + max(s, a) - a)}–{fmt_mmss(xoff + min(e, b) - a)}" for s, e in pieces if s < b and e > a]
+        xmap.append(f"{fmt_mmss(xoff)}–{fmt_mmss(xoff + b - a)} = source {fmt_mmss(a)}–{fmt_mmss(b)}, {ids}; "
+                    f"used in the draft at context time {', '.join(used)}")
+        xoff += b - a
     work = p.dir / "highlights" / "_roughcut"
     work.mkdir(parents=True, exist_ok=True)
-    out = work / "rough.mp4"
+    rough, ctx = work / "rough.mp4", work / "context.mp4"
     has_video = media_has_video(p)
-    args, fc, cat = [], "", ""
-    for i, (a, b) in enumerate(pieces):
-        args += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media)]
-        if has_video:
-            fc += f"[{i}:v]setpts=PTS-STARTPTS,scale=-2:360,fps=10,format=yuv420p,setsar=1[v{i}];"
-        fc += f"[{i}:a]asetpts=PTS-STARTPTS,aresample=44100,afade=t=in:d=0.03,afade=t=out:st={max(0, b - a - 0.06):.3f}:d=0.06[a{i}];"
-        cat += (f"[v{i}]" if has_video else "") + f"[a{i}]"
-    fc += f"{cat}concat=n={len(pieces)}:v={1 if has_video else 0}:a=1" + ("[v][a]" if has_video else "[a]")
-    vmap = ["-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30"] if has_video else []
-    subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", fc, *vmap, "-map", "[a]",
-                    "-c:a", "aac", "-b:a", "64k", str(out)], check=True)
-    mime = "video/mp4" if has_video else "audio/mp4"
-    p.log(f"  看粗剪複查：上傳粗剪 {off:.0f} 秒（{out.stat().st_size / 1e6:.1f} MB）")
-    f = gemini.upload_file(out, mime, log=p.log)
+    mime = lowres_concat(p, pieces, rough, has_video)
+    lowres_concat(p, merged, ctx, has_video)
+    p.log(f"  看粗剪複查：上傳粗剪 {off:.0f} 秒＋前後文 {xoff:.0f} 秒"
+          f"（{(rough.stat().st_size + ctx.stat().st_size) / 1e6:.1f} MB）")
+    f1 = gemini.upload_file(rough, mime, log=p.log)
+    f2 = gemini.upload_file(ctx, mime, log=p.log)
     try:
         system = ("You are the senior editor reviewing the ROUGH CUT of a highlight reel before it is approved. You "
-                  "WATCH the rough cut (attached) — not just read it.\n" + rules +
-                  "\nWatch it as a viewer would and check every clip: does it start where a thought starts and does "
-                  "every explanation actually finish; does anything end mid-thought or on the other speaker starting "
-                  "a question; how is the delivery (energy, emotion, a laugh, an awkward pause, a weak or mumbled "
-                  "moment); do the jump cuts feel abrupt (picture jumps, voice tone jumps); does the reel flow and "
-                  "build? Fix problems by extending / trimming clips by whole sentences (use the FULL TRANSCRIPT to "
-                  "reach material outside the cut), replacing a weak take with a better-delivered sentence, "
-                  "reordering, or dropping a clip. Keep what already works. Return the full corrected plan in the "
-                  "same format — sentence ids only, never timestamps.")
-        prompt = ("ROUGH CUT MAP (time in the attached rough cut → what it contains):\n" + "\n".join(cmap) +
-                  f"\n\nTotal {off:.0f}s.\n\nFULL TRANSCRIPT (sentence id, start, length, speaker: text):\n" + script)
-        fixed, _ = gemini.generate_json(p.options["text_model"],
-                                        [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": prompt}],
-                                        system=system, schema=PLAN_SCHEMA, low_res=True, usage=p.usage, log=p.log,
-                                        max_tokens=32768)
+                  "WATCH it — not just read it.\n" + rules +
+                  "\nVIDEO 1 is the rough cut. VIDEO 2 is CONTEXT: every clip with ~" + f"{handle:.0f}" + " seconds of "
+                  "the source before and after it, so you can see and hear what you could extend into or swap in.\n"
+                  "Watch the rough cut as a viewer would and check every clip: does it start where a thought starts "
+                  "and does every explanation actually finish; does anything end mid-thought or on the other "
+                  "speaker starting a question; how is the delivery (energy, emotion, a laugh, an awkward pause, a "
+                  "weak or mumbled moment); do the jump cuts feel abrupt (picture jumps, voice tone jumps); does the "
+                  "reel flow and build? Use the context video to judge extensions and alternatives by how they are "
+                  "actually delivered, and the FULL TRANSCRIPT for anything further away. Fix problems by "
+                  "extending / trimming clips by whole sentences, replacing a weak take with a better-delivered "
+                  "sentence, reordering, or dropping a clip. Keep what already works. In each clip's `why`, say "
+                  "briefly what you kept or changed and why. Return the full corrected plan in the same format — "
+                  "sentence ids only, never timestamps.")
+        prompt = ("VIDEO 1 — ROUGH CUT MAP (time in the rough cut → content):\n" + "\n".join(cmap) +
+                  f"\nTotal {off:.0f}s.\n\nVIDEO 2 — CONTEXT MAP (time in the context video → source):\n" +
+                  "\n".join(xmap) + "\n\nFULL TRANSCRIPT (sentence id, start, length, speaker: text):\n" + script)
+        fixed, _ = gemini.generate_json(
+            p.options["text_model"],
+            [{"text": "VIDEO 1 (rough cut):"}, {"file_data": {"mime_type": mime, "file_uri": f1["uri"]}},
+             {"text": "VIDEO 2 (context with handles):"}, {"file_data": {"mime_type": mime, "file_uri": f2["uri"]}},
+             {"text": prompt}],
+            system=system, schema=PLAN_SCHEMA, low_res=True, usage=p.usage, log=p.log, max_tokens=32768)
     finally:
-        gemini.delete_file(f["name"])
-        out.unlink(missing_ok=True)
+        gemini.delete_file(f1["name"])
+        gemini.delete_file(f2["name"])
+        rough.unlink(missing_ok=True)
+        ctx.unlink(missing_ok=True)
     if fixed.get("chapters"):
         p.log(f"  看粗剪複查：{dur(data):.0f} 秒 → {dur(fixed):.0f} 秒")
         return fixed
