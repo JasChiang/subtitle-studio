@@ -4,36 +4,64 @@
 //   text-render < spec.json
 //   spec: {"width":1920,"height":1080,"items":[{"out":"/x/sub_001.png","kind":"sub"|"card"|"tag"|"blank",
 //          "lines":["主行","second line"]}]}
+//
+// Style must match static/app.css (.ov-a / .ov-b): sizes in 1080p units, outline drawn OUTSIDE the glyphs
+// (outline pass first, clean fill on top — like libass / CSS paint-order: stroke fill).
 import AppKit
 import Foundation
 
 struct Item: Decodable { let out: String; let kind: String; let lines: [String] }
 struct Spec: Decodable { let width: Int; let height: Int; let items: [Item] }
 
+let outlineColor = NSColor(white: 0.05, alpha: 1)
+let pale = NSColor(red: 0.85, green: 0.9, blue: 0.94, alpha: 1)        // #d9e6f0
+let yellow = NSColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)         // #ffd60a
+let spokenColor = yellow                                                // karaoke: already-spoken words
+
 func font(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
-    let name = weight == .black ? "PingFangTC-Semibold" : weight == .bold ? "PingFangTC-Semibold" : "PingFangTC-Regular"
+    let name = weight == .regular ? "PingFangTC-Regular" : "PingFangTC-Semibold"
     return NSFont(name: name, size: size) ?? NSFont.systemFont(ofSize: size, weight: weight)
 }
 
-func attr(_ s: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, stroke: CGFloat = 0,
-          align: NSTextAlignment = .center, shadow: Bool = true) -> NSAttributedString {
+func para(_ align: NSTextAlignment, _ size: CGFloat) -> NSParagraphStyle {
     let ps = NSMutableParagraphStyle()
     ps.alignment = align
     ps.lineBreakMode = .byWordWrapping
     ps.lineSpacing = size * 0.08
-    var a: [NSAttributedString.Key: Any] = [.font: font(size, weight), .foregroundColor: color, .paragraphStyle: ps]
-    if stroke > 0 {
-        a[.strokeColor] = NSColor(white: 0.05, alpha: 1)
-        a[.strokeWidth] = -stroke
+    return ps
+}
+
+/// Fill-only text (no outline, no shadow).
+func fill(_ s: String, size: CGFloat, weight: NSFont.Weight, color: NSColor,
+          align: NSTextAlignment = .center) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [.font: font(size, weight), .foregroundColor: color,
+                                               .paragraphStyle: para(align, size)])
+}
+
+/// Draws `s` with an outline of `outline` × font size visible OUTSIDE the glyphs, plus a soft shadow.
+func drawOutlined(_ s: NSAttributedString, in rect: NSRect, outline: CGFloat, shadow: Bool = true) {
+    if outline > 0 {
+        let o = NSMutableAttributedString(attributedString: s)
+        let all = NSRange(location: 0, length: o.length)
+        o.addAttribute(.foregroundColor, value: NSColor.clear, range: all)
+        o.addAttribute(.strokeColor, value: outlineColor, range: all)
+        // strokeWidth is a % of the font size, centred on the glyph edge → ×2 so the outer half == outline
+        o.addAttribute(.strokeWidth, value: outline * 200, range: all)
+        if shadow {
+            let sh = NSShadow()
+            sh.shadowColor = NSColor(white: 0, alpha: 0.6)
+            let size = (s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize ?? 40
+            sh.shadowBlurRadius = size * 0.08
+            sh.shadowOffset = NSSize(width: 0, height: -size * 0.03)
+            o.addAttribute(.shadow, value: sh, range: all)
+        }
+        o.draw(with: rect, options: [.usesLineFragmentOrigin])
     }
-    if shadow {
-        let sh = NSShadow()
-        sh.shadowColor = NSColor(white: 0, alpha: 0.85)
-        sh.shadowBlurRadius = size * 0.12
-        sh.shadowOffset = NSSize(width: 0, height: -size * 0.04)
-        a[.shadow] = sh
-    }
-    return NSAttributedString(string: s, attributes: a)
+    s.draw(with: rect, options: [.usesLineFragmentOrigin])
+}
+
+func height(_ s: NSAttributedString, width: CGFloat) -> CGFloat {
+    ceil(s.boundingRect(with: NSSize(width: width, height: 10_000), options: [.usesLineFragmentOrigin]).height)
 }
 
 func render(_ it: Item, w: Int, h: Int) throws {
@@ -45,40 +73,35 @@ func render(_ it: Item, w: Int, h: Int) throws {
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     NSColor.clear.set()
     NSRect(x: 0, y: 0, width: W, height: H).fill()
-    let margin = W * 0.07
-    let yellow = NSColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
-    let karaoke = NSColor(red: 0.5, green: 0.94, blue: 0.81, alpha: 1)  // #7ff0cf, same as the web preview
+    let margin = W * 0.07, tw = W - 2 * margin
     switch it.kind {
     case "sub":
-        // bottom-centred: first line large white, second (translation / original) smaller pale
+        // bottom-centred: line 1 = 56 white semibold, line 2 = 38 pale regular (same as .ov-a / .ov-b)
         var y = 46 * u
         for (i, line) in it.lines.enumerated().reversed() where !line.isEmpty {
-            // "\u{1}" marks the karaoke split: text before it is already spoken (highlight colour)
+            let size = (i == 0 ? 56 : 38) * u
+            let weight: NSFont.Weight = i == 0 ? .semibold : .regular
+            let base: NSColor = i == 0 ? .white : pale
+            // "\u{1}" marks the karaoke split: text before it is already spoken
             let parts = line.components(separatedBy: "\u{1}")
-            let base: NSColor = i == 0 ? .white : NSColor(red: 0.85, green: 0.9, blue: 0.94, alpha: 1)
             let s = NSMutableAttributedString()
             for (k, part) in parts.enumerated() {
-                s.append(attr(part, size: (i == 0 ? 56 : 38) * u, weight: i == 0 ? .bold : .regular,
-                              color: parts.count > 1 && k == 0 ? karaoke : base, stroke: 3.2))
+                s.append(fill(part, size: size, weight: weight, color: parts.count > 1 && k == 0 ? spokenColor : base))
             }
-            let r = s.boundingRect(with: NSSize(width: W - 2 * margin, height: H), options: [.usesLineFragmentOrigin])
-            s.draw(with: NSRect(x: margin, y: y, width: W - 2 * margin, height: ceil(r.height)),
-                   options: [.usesLineFragmentOrigin])
-            y += ceil(r.height) + 6 * u
+            let hgt = height(s, width: tw)
+            drawOutlined(s, in: NSRect(x: margin, y: y, width: tw, height: hgt), outline: 0.05)
+            y += hgt + 6 * u
         }
     case "card":
-        let title = attr(it.lines.first ?? "", size: 96 * u, weight: .black, color: yellow, stroke: 2.5)
-        let sub = attr(it.lines.count > 1 ? it.lines[1] : "", size: 40 * u, weight: .regular, color: .white)
-        let tr = title.boundingRect(with: NSSize(width: W - 2 * margin, height: H), options: [.usesLineFragmentOrigin])
-        let sr = sub.boundingRect(with: NSSize(width: W - 2 * margin, height: H), options: [.usesLineFragmentOrigin])
-        let total = tr.height + 18 * u + sr.height
+        let title = fill(it.lines.first ?? "", size: 96 * u, weight: .semibold, color: yellow)
+        let sub = fill(it.lines.count > 1 ? it.lines[1] : "", size: 40 * u, weight: .regular, color: .white)
+        let th = height(title, width: tw), sh = height(sub, width: tw)
+        let total = th + 18 * u + sh
         let top = (H + total) / 2
-        title.draw(with: NSRect(x: margin, y: top - tr.height, width: W - 2 * margin, height: ceil(tr.height)),
-                   options: [.usesLineFragmentOrigin])
-        sub.draw(with: NSRect(x: margin, y: top - total, width: W - 2 * margin, height: ceil(sr.height)),
-                 options: [.usesLineFragmentOrigin])
+        drawOutlined(title, in: NSRect(x: margin, y: top - th, width: tw, height: th), outline: 0.04)
+        drawOutlined(sub, in: NSRect(x: margin, y: top - total, width: tw, height: sh), outline: 0.05)
     case "tag":
-        let s = attr(it.lines.first ?? "", size: 34 * u, weight: .bold, color: .black, align: .left, shadow: false)
+        let s = fill(it.lines.first ?? "", size: 34 * u, weight: .semibold, color: .black, align: .left)
         let r = s.boundingRect(with: NSSize(width: W * 0.6, height: H), options: [.usesLineFragmentOrigin])
         let pad = 14 * u
         let box = NSRect(x: 40 * u, y: H - 40 * u - r.height - 2 * pad, width: r.width + 2 * pad, height: r.height + 2 * pad)
