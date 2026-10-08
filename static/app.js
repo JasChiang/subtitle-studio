@@ -86,8 +86,8 @@ async function selectProject(id) {
   $("#projName").textContent = meta.name;
   $("#projMedia").textContent = meta.media;
   const src = `/api/projects/${encodeURIComponent(id)}/media`;
-  S.reel = null; $("#reelBanner").hidden = true;
-  if (video.dataset.src !== src || !video.src.includes("/media")) { video.src = src; video.dataset.src = src; }
+  S.seq = null;
+  if (video.dataset.src !== src) { video.src = src; video.dataset.src = src; }
   $("#karaoke").checked = !!({ ...S.defaults.options, ...(meta.options || {}) }).karaoke;
   renderStages();
   renderOpts();
@@ -359,10 +359,7 @@ $("#karaoke").addEventListener("change", async (e) => {  // shared with the high
 $("#onlyChanged").addEventListener("change", applyFilter);
 
 // ───────── playback sync
-function seek(t) {
-  if (S.reel) { exitReel(); video.addEventListener("loadedmetadata", () => { video.currentTime = Math.max(0, t); }, { once: true }); return; }
-  video.currentTime = Math.max(0, t);
-}
+function seek(t) { video.currentTime = Math.max(0, t); }
 function findCue(t) {
   let lo = 0, hi = S.cues.length - 1, ans = -1;
   while (lo <= hi) {
@@ -371,7 +368,6 @@ function findCue(t) {
   }
   return ans >= 0 && t < S.cues[ans].end ? ans : -1;
 }
-let lastOv = "";
 function tick() {
   const t = video.currentTime;
   seqTick(t);
@@ -388,58 +384,74 @@ function tick() {
       if ($("#follow").checked && !video.paused && !editing) tr.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }
-  const showOv = $("#showOverlay").checked && !S.reel;
-  $("#overlay").hidden = !showOv;
-  if (showOv) {
-    const c = S.cues[i];
-    let a = "", b = "";
-    if (c) {
-      const src = $("#karaoke").checked && c.words?.length
-        ? joinHTML(c.words.map((w) => `<span class="w${t >= w.s ? " on" : ""}">${esc(w.t)}</span>`), c.words)
-        : esc(c.text);
-      const tr = esc((c.tr || "").replace(/⏎/g, " "));
-      const trFirst = (S.cur?.options?.sub_order || S.defaults.options.sub_order) !== "src-first";
-      [a, b] = !tr ? [src, ""] : trFirst ? [tr, src] : [src, tr];
-    }
-    const key = a + "|" + b;
-    if (key !== lastOv) { $("#ovA").innerHTML = a; $("#ovB").innerHTML = b; lastOv = key; }
-  }
+  composite(t, i);
   requestAnimationFrame(tick);
 }
-// place the overlay over the actual picture (letterboxing aside) and scale it like the 1080p burn-in
-function layoutOverlay() {
+// ───────── live composite (non-destructive preview)
+// Every layer is a PNG from /overlay, drawn by bin/text-render exactly as the export draws it.
+const CARD = 1.7, ZOOM = 1.12;
+const ly = { sub: $("#lySub"), card: $("#lyCard"), tag: $("#lyTag") };
+function layoutOverlay() {  // cover exactly the visible picture (letterboxing aside)
   const vw = video.videoWidth, vh = video.videoHeight, bw = video.clientWidth, bh = video.clientHeight;
   if (!vw || !vh || !bw) return;
-  const k = Math.min(bw / vw, bh / vh), dw = vw * k, dh = vh * k, u = dh / 1080;
-  const ov = $("#overlay");
-  ov.style.setProperty("--u", u);
-  ov.style.left = (bw - dw) / 2 + dw * 0.07 + "px";
-  ov.style.width = dw * 0.86 + "px";
-  ov.style.bottom = (bh - dh) / 2 + 46 * u + "px";
+  const k = Math.min(bw / vw, bh / vh), dw = vw * k, dh = vh * k;
+  S.u = dh / 1080;
+  Object.assign($("#layers").style, { left: (bw - dw) / 2 + "px", top: (bh - dh) / 2 + "px", width: dw + "px", height: dh + "px" });
 }
 video.addEventListener("loadedmetadata", layoutOverlay);
 new ResizeObserver(layoutOverlay).observe(video);
 
-// play a finished reel in the main player; "回到原片" restores the source video and position
-function playReel(url) {
-  if (!S.reel) S.reel = { back: video.currentTime };
-  S.seq = null;
-  video.src = url;
-  $("#reelBanner").hidden = false;
-  $("#overlay").hidden = true;  // the reel already has burned-in subtitles
-  video.play().catch(() => {});
+const overlayURL = (kind, lines) => `${pidURL()}/overlay?kind=${kind}` + lines.map((l) => "&l=" + encodeURIComponent(l)).join("");
+const preloaded = new Set();
+function preload(url) { if (!preloaded.has(url)) { preloaded.add(url); new Image().src = url; } }
+function showLayer(el, url) {  // swap only once the new image is decoded → no flicker
+  if (!url) { if (el.dataset.want) { el.dataset.want = ""; el.removeAttribute("src"); } return; }
+  if (el.dataset.want === url) return;
+  el.dataset.want = url;
+  const im = new Image();
+  im.onload = () => { if (el.dataset.want === url) el.src = url; };
+  im.src = url;
+  preloaded.add(url);
 }
-function exitReel() {
-  if (!S.reel) return;
-  const back = S.reel.back;
-  S.reel = null;
-  video.src = video.dataset.src;
-  const restore = () => { video.currentTime = back; };
-  if (video.readyState >= 1) restore(); else video.addEventListener("loadedmetadata", restore, { once: true });
-  $("#reelBanner").hidden = true;
-  $("#overlay").hidden = !$("#showOverlay").checked;
+function cueLines(c, t) {  // same rules as highlights.reel_subs
+  const opts = { ...S.defaults.options, ...(S.cur?.options || {}) };
+  let src = c.text;
+  if (opts.karaoke && c.words?.length) {
+    const spoken = c.words.filter((w) => w.s <= t + 1e-6);
+    if (spoken.length) { const pre = joinWords(spoken); src = pre + "\x01" + joinWords(c.words).slice(pre.length); }
+  }
+  const tr = (c.tr || "").replace(/⏎/g, " ").trim();
+  return !tr ? [src] : opts.sub_order === "src-first" ? [src, tr] : [tr, src];
 }
-$("#reelBack").onclick = exitReel;
+function prefetchCue(c) {
+  if (!c || !S.cur) return;
+  const opts = { ...S.defaults.options, ...(S.cur.options || {}) };
+  const times = opts.karaoke && c.words?.length ? [c.start - 1, ...c.words.map((w) => w.s)] : [c.start];
+  times.forEach((t) => preload(overlayURL("sub", cueLines(c, t))));
+}
+let lastCue = -2;
+function composite(t, i) {
+  const on = $("#showOverlay").checked && S.cur;
+  const c = S.cues[i];
+  showLayer(ly.sub, on && c ? overlayURL("sub", cueLines(c, t)) : null);
+  if (i !== lastCue) { lastCue = i; prefetchCue(S.cues[i]); prefetchCue(S.cues[i + 1]); }
+  // reel preview layers: chapter card (+ blurred picture), tag, punch-in zoom
+  const q = S.seq, pc = q && q.i >= 0 ? q.pieces[q.i] : null;
+  let card = null, tag = null, zoom = 1, blur = false;
+  if (pc && on) {
+    zoom = pc.zoom || 1;
+    if (pc.title && pc.cards) {
+      if (pc.first && t - pc.start < Math.min(CARD, pc.chapterDur)) { card = overlayURL("card", [pc.title, pc.title_en || ""]); blur = true; }
+      else tag = overlayURL("tag", [pc.title]);
+    }
+  }
+  showLayer(ly.card, card);
+  showLayer(ly.tag, tag);
+  const tf = zoom !== 1 ? `scale(${zoom})` : "";
+  if (video.style.transform !== tf) { video.style.transform = tf; video.style.transformOrigin = "45% 35%"; }
+  const fl = blur ? `blur(${18 * (S.u || 0.5)}px) brightness(0.88) saturate(0.75)` : "";
+  if (video.style.filter !== fl) video.style.filter = fl;
+}
 
 function joinHTML(spans, words) {
   const cjk = /[㐀-鿿぀-ヿ가-힯]/;
@@ -532,13 +544,20 @@ async function refreshExtras() {
   if (!S.cur) return;
   loadSummary();
   await loadPlans();
-  if (S.plan) openPlan(S.plan.id);
+  if (S.openNewestPlan && S.plans?.length) {
+    S.openNewestPlan = false;
+    await openPlan(S.plans[0].id);
+    S.seq = { pieces: seqPieces(), i: -1 }; seqNext(); video.pause();  // first shot ready in the top player
+    return;
+  }
+  if (S.plan && !S.planDirty) openPlan(S.plan.id);
 }
 function needIdle() {
   if (S.cur.running || S.cur.status?.state === "running") { alertBox("目前有工作在執行，等它跑完再試"); return false; }
   return true;
 }
 async function startTask(path, body) {
+  S.openNewestPlan = path === "/highlights";
   try {
     await api(pidURL() + path, { method: "POST", body });
     S.cur.running = true;
@@ -597,39 +616,59 @@ function planDur(pl) {
   const d = (cs) => cs.reduce((a, c) => a + c.end - c.start, 0);
   return d(pl.hook || []) + pl.chapters.reduce((a, ch) => a + d(ch.clips), 0);
 }
+function clipCues(c) { return S.cues.filter((x) => x.end > c.start + 0.05 && x.start < c.end - 0.05); }
 function clipRow(c, ci, k) {
-  const tx = clipText(c);
   return `<div class="clip" data-ci="${ci}" data-k="${k}">
     <button data-a="play" title="預覽這段">▶</button>
     <input value="${fmt(c.start)}" data-f="start"><input value="${fmt(c.end)}" data-f="end">
-    <div class="txt">${esc(tx.src)}<div class="tr">${esc(tx.tr)}</div>${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}</div>
+    <div class="txt">${clipCues(c).map((x) => `<div class="cl" data-id="${x.id}">
+        <div contenteditable="plaintext-only" data-cf="text">${esc(x.text)}</div>
+        <div contenteditable="plaintext-only" data-cf="tr" class="tr">${esc(x.tr || "")}</div></div>`).join("")}
+      ${c.why ? `<div class="why">${esc(c.why)}</div>` : ""}</div>
     <div><button data-a="up" title="上移">↑</button><button data-a="down" title="下移">↓</button><button data-a="del" title="刪除">✕</button></div></div>`;
 }
 function renderPlan() {
   const pl = S.plan, box = $("#hlEdit");
   if (!pl) { box.innerHTML = `<p class="muted">選一個企劃，或在左邊產生新的。</p>`; return; }
-  const r = pl.rendered;
+  const r = pl.rendered, subs = pl.options?.subs || "burn";
   box.innerHTML = `<div class="hl-bar"><input class="title" id="plTitle" value="${esc(pl.title || "")}">
       <span id="plDur" class="muted">${planDur(pl).toFixed(1)} 秒</span>
-      <button id="plPreview">▶ 預覽整支</button><button id="plSave">存檔</button>
-      <button id="plRender" class="primary">輸出影片</button></div>
-    <div class="muted small">要求：${esc(pl.request?.focus || "AI 自選最精彩段落")}｜目標 ${pl.request?.seconds || "?"} 秒。預覽在上方播放器播放；調整入／出點可以直接改時間，或在字幕分頁找到時間後填進來。</div>
+      <button id="plPreview" class="primary">▶ 預覽</button><button id="plSave">存檔</button></div>
+    <div class="muted small">要求：${esc(pl.request?.focus || "AI 自選最精彩段落")}｜目標 ${pl.request?.seconds || "?"} 秒。
+      預覽在上方播放器即時合成（字幕、字卡、標籤、放大都沒有燒進去），下面的字幕可以直接改，改完預覽立刻反映。</div>
     ${(pl.hook || []).length ? `<div class="chap"><b>開頭 hook</b>${pl.hook.map((c, k) => clipRow(c, -1, k)).join("")}</div>` : ""}
     ${pl.chapters.map((ch, ci) => `<div class="chap"><div class="chap-head">
         <input data-ci="${ci}" data-f="title" value="${esc(ch.title)}" placeholder="章節標題">
         <input data-ci="${ci}" data-f="title_en" value="${esc(ch.title_en || "")}" placeholder="English title">
         <button data-ci="${ci}" data-a="delch" title="刪除整章">✕ 章</button></div>
         ${ch.clips.map((c, k) => clipRow(c, ci, k)).join("")}</div>`).join("")}
-    <div class="hl-out">${r ? `<p>已輸出 ${r.duration} 秒：<button id="plWatch" class="primary">▶ 在上方播放成品</button>
+    <div class="hl-out"><div class="row gap">
+        <label>字幕：<select id="plSubs">
+          <option value="burn" ${subs === "burn" ? "selected" : ""}>燒進畫面（含逐字高亮）</option>
+          <option value="soft" ${subs === "soft" ? "selected" : ""}>內嵌字幕軌（播放器可開關、可再編輯）</option>
+          <option value="none" ${subs === "none" ? "selected" : ""}>不加字幕（另附 SRT）</option></select></label>
+        <button id="plRender" class="primary">確認，輸出影片</button></div>
+      ${r ? `<p class="small">上次輸出：${r.duration} 秒（${{ burn: "燒進畫面", soft: "內嵌字幕軌", none: "無字幕" }[r.subs || "burn"]}）
+        <a class="btn" href="${pidURL()}/highlights/${pl.id}/video?ts=${r.at}" target="_blank">開啟</a>
         <a class="btn" href="${pidURL()}/highlights/${pl.id}/download">下載 MP4</a>
-        <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載字幕 SRT</a></p>` : `<p class="muted small">尚未輸出影片。</p>`}</div>`;
+        <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載 SRT</a></p>` : ""}</div>`;
 }
 const clipsOf = (ci) => ci < 0 ? S.plan.hook : S.plan.chapters[ci].clips;
 function planChanged() {
   S.planDirty = true;
   $("#plDur").textContent = planDur(S.plan).toFixed(1) + " 秒（未存檔）";
 }
+$("#hlEdit").addEventListener("input", (e) => {  // subtitle edits inside the plan → the project's cues
+  const cf = e.target.dataset.cf;
+  if (!cf) return;
+  const c = S.cues.find((x) => x.id === +e.target.closest(".cl").dataset.id);
+  if (!c) return;
+  c[cf] = e.target.innerText.replace(/\n+$/, "");
+  if (cf === "text") c.words = null;  // edited wording no longer matches the word clock (no karaoke)
+  setDirty(); planChanged();
+});
 $("#hlEdit").addEventListener("change", (e) => {
+  if (e.target.id === "plSubs") { S.plan.options = { ...(S.plan.options || {}), subs: e.target.value }; planChanged(); return; }
   const f = e.target.dataset.f;
   if (e.target.id === "plTitle") { S.plan.title = e.target.value; planChanged(); return; }
   const row = e.target.closest(".clip");
@@ -643,7 +682,6 @@ $("#hlEdit").addEventListener("change", (e) => {
 $("#hlEdit").addEventListener("click", async (e) => {
   const a = e.target.dataset.a, id = e.target.id;
   if (id === "plPreview") return playSeq();
-  if (id === "plWatch") return playReel(`${pidURL()}/highlights/${S.plan.id}/video?ts=${S.plan.rendered.at}`);
   if (id === "plSave") return savePlan();
   if (id === "plRender") {
     if (!needIdle()) return;
@@ -654,7 +692,7 @@ $("#hlEdit").addEventListener("click", async (e) => {
   const row = e.target.closest(".clip");
   if (!row || !a) return;
   const ci = +row.dataset.ci, k = +row.dataset.k, list = clipsOf(ci);
-  if (a === "play") { S.seq = { pieces: [{ ...list[k], ci, k }], i: -1 }; return seqNext(); }
+  if (a === "play") { const all = seqPieces(); S.seq = { pieces: all.filter((p) => p.ci === ci && p.k === k), i: -1 }; return seqNext(); }
   if (a === "del") list.splice(k, 1);
   if (a === "up" && k > 0) [list[k - 1], list[k]] = [list[k], list[k - 1]];
   if (a === "down" && k < list.length - 1) [list[k + 1], list[k]] = [list[k], list[k + 1]];
@@ -662,33 +700,43 @@ $("#hlEdit").addEventListener("click", async (e) => {
   planChanged(); renderPlan(); $("#plDur").textContent = planDur(S.plan).toFixed(1) + " 秒（未存檔）";
 });
 async function savePlan() {
+  if (S.dirty) { await saveCues(); renderCues(); }
   S.plan = await api(`${pidURL()}/highlights/${S.plan.id}`, { method: "POST", body: S.plan });
   S.planDirty = false;
   renderPlan(); loadPlans();
 }
-function playSeq() {
-  exitReel();
-  const pl = S.plan, pieces = [];
+function seqPieces() {  // same timeline as highlights.timeline()
+  const pl = S.plan, o = pl.options || {}, pieces = [];
   (pl.hook || []).forEach((c, k) => pieces.push({ ...c, ci: -1, k }));
-  pl.chapters.forEach((ch, ci) => ch.clips.forEach((c, k) => pieces.push({ ...c, ci, k, title: k === 0 ? ch.title : "" })));
-  S.seq = { pieces, i: -1 };
+  pl.chapters.forEach((ch, ci) => {
+    const chapterDur = ch.clips.reduce((a, c) => a + c.end - c.start, 0);
+    ch.clips.forEach((c, k) => pieces.push({ ...c, ci, k, first: k === 0, chapterDur, title: ch.title, title_en: ch.title_en,
+      cards: o.cards !== false, zoom: o.zoom !== false && k % 2 ? ZOOM : 1 }));
+  });
+  return pieces;
+}
+function playSeq() {
+  S.seq = { pieces: seqPieces(), i: -1 };
   seqNext();
 }
 function seqNext() {
   const q = S.seq;
   q.i++;
   $$("#hlEdit .clip.playing").forEach((x) => x.classList.remove("playing"));
-  if (q.i >= q.pieces.length) { video.pause(); S.seq = null; return; }
+  if (q.i >= q.pieces.length) { video.pause(); S.seq = null; $("#seqBanner").hidden = true; return; }
   const pc = q.pieces[q.i];
+  $("#seqBanner").hidden = false;
+  $("#seqBanner").textContent = `預覽剪輯 ${q.i + 1}/${q.pieces.length}` + (pc.title ? `｜${pc.title}` : "｜開頭 hook");
   $(`#hlEdit .clip[data-ci="${pc.ci}"][data-k="${pc.k}"]`)?.classList.add("playing");
-  if (pc.title) $("#statusLine").textContent = `預覽：${pc.title}`;
   seek(pc.start);
   video.play();
 }
 function seqTick(t) {
   const q = S.seq;
-  if (!q || q.i < 0 || video.paused) return;
-  if (t >= q.pieces[q.i].end - 0.03) seqNext();
+  if (!q || q.i < 0 || video.seeking) return;
+  const pc = q.pieces[q.i];
+  if (t < pc.start - 0.6 || t > pc.end + 0.6) { S.seq = null; $("#seqBanner").hidden = true; return; }  // user scrubbed away
+  if (!video.paused && t >= pc.end - 0.03) seqNext();
 }
 
 boot();

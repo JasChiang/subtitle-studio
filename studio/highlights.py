@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -244,6 +245,30 @@ def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = F
     return out
 
 
+def overlay_png(p: Project, kind: str, lines: list[str]) -> Path:
+    """One overlay image (sub / card / tag) exactly as the export draws it; cached by content."""
+    import hashlib
+    W, H = project_size(p)
+    key = hashlib.sha1(json.dumps([kind, lines, W, H, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
+                       .encode()).hexdigest()[:20]
+    out = p.dir / "overlays" / f"{key}.png"
+    if not out.exists():
+        out.parent.mkdir(exist_ok=True)
+        tmp = out.with_suffix(f".{threading.get_ident()}.tmp.png")
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "items": [
+            {"out": str(tmp), "kind": kind, "lines": lines}]}).encode(), check=True, capture_output=True)
+        tmp.replace(out)
+    return out
+
+
+def project_size(p: Project) -> tuple[int, int]:
+    m = p.meta
+    if not m.get("size"):
+        p.update(size=list(probe_size(p.media)))
+        m = p.meta
+    return tuple(m["size"])
+
+
 def probe_size(path: Path) -> tuple[int, int]:
     s = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                                  "stream=width,height", "-of", "csv=p=0:s=x", str(path)]).decode().strip()
@@ -286,10 +311,11 @@ def render_highlight(p: Project, hid: str):
 
     # overlay images
     items = [{"out": str(work / "blank.png"), "kind": "blank", "lines": []}]
+    sub_mode = plan.get("options", {}).get("subs", "burn")   # burn | soft | none
     subs = reel_subs(pieces, cues, p.options.get("sub_order", "tr-first") != "src-first",
-                     bool(p.options.get("karaoke")))
+                     bool(p.options.get("karaoke")) and sub_mode == "burn")
     sub_ev, card_ev, tag_ev = [], [], []
-    for i, (a, b, lines) in enumerate(subs):
+    for i, (a, b, lines) in enumerate(subs if sub_mode == "burn" else []):
         f = str(work / f"sub_{i:04d}.png")
         items.append({"out": f, "kind": "sub", "lines": lines})
         sub_ev.append((a, b, f))
@@ -340,12 +366,18 @@ def render_highlight(p: Project, hid: str):
         fc += f"[{n + k}:v]format=rgba[o{k}];[{cur}][o{k}]overlay=eof_action=pass:format=auto[x{k}];"
         cur = f"x{k}"
     fc = fc.rstrip(";")
+    srt_path = p.dir / "highlights" / f"{hid}.srt"
+    srt_path.write_text(reel_srt(subs))
+    soft = []
+    if sub_mode == "soft":  # a subtitle track players can toggle (no karaoke in soft subs)
+        args += ["-i", str(srt_path)]
+        soft = ["-map", f"{n + len(tracks)}:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=chi"]
     out = p.dir / "highlights" / f"{hid}.mp4"
     tmp = out.with_suffix(".part.mp4")
     enc = ["-c:v", "h264_videotoolbox", "-b:v", "8M"] if hw_encoder() else ["-c:v", "libx264", "-crf", "19",
                                                                              "-preset", "medium"]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", fc, "-map", f"[{cur}]",
-           "-map", "[ac]", *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn", "-map_chapters", "-1", "-movflags", "+faststart",
+           "-map", "[ac]", *soft, *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn", "-map_chapters", "-1", "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", str(tmp)]
     p.log(f"輸出精華：{n} 段、{len(subs)} 條字幕、{total:.1f} 秒（{'硬體' if hw_encoder() else '軟體'}編碼）")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -356,8 +388,7 @@ def render_highlight(p: Project, hid: str):
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg 失敗：" + err[-600:])
     tmp.replace(out)
-    (p.dir / "highlights" / f"{hid}.srt").write_text(reel_srt(subs))
-    plan["rendered"] = {"file": out.name, "at": time.time(), "duration": round(total, 2)}
+    plan["rendered"] = {"file": out.name, "at": time.time(), "duration": round(total, 2), "subs": sub_mode}
     p.write(f"highlights/{hid}.json", plan)
     p.log(f"精華影片完成：{out.name}（{out.stat().st_size / 1e6:.1f} MB）")
 

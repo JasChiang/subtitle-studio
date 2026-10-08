@@ -233,6 +233,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(p.read("reference.json") or {})
             if sub == "media":
                 return self.send_file(p.media)
+            if sub == "overlay":  # live-preview layer, drawn by the same renderer as the export
+                kind = q.get("kind", ["sub"])[0]
+                if kind not in ("sub", "card", "tag"):
+                    raise KeyError
+                f = highlights.overlay_png(p, kind, q.get("l", []))
+                body = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if sub == "size":
+                return self.send_json(highlights.project_size(p))
             if sub == "summary":
                 s = p.read("summary.json")
                 if q.get("format", [""])[0] == "md" and s:

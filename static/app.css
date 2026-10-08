@@ -44,16 +44,11 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .player { flex: 1.4; min-width: 0; }
 .video-wrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
 video { width: 100%; max-height: 46vh; display: block; }
-/* Same style as the burned-in subtitles (render/main.swift): sizes are in 1080p units, --u = shown height / 1080 */
-.overlay { position: absolute; text-align: center; pointer-events: none; --u: 0.5;
-  font-family: "PingFang TC", -apple-system, sans-serif; line-height: 1.3; }
-/* outline 0.1em centred + paint-order → 0.05em visible outside the glyphs, same as text-render's two passes */
-.ov-a, .ov-b { -webkit-text-stroke: 0.1em #0d0d0d; paint-order: stroke fill;
-  text-shadow: 0 0.03em 0.08em rgba(0,0,0,.6); overflow-wrap: anywhere; }
-.ov-a { color: #fff; font-weight: 600; font-size: calc(var(--u) * 56px); }
-.ov-b { color: #d9e6f0; font-weight: 400; font-size: calc(var(--u) * 38px); margin-top: calc(var(--u) * 6px); }
-.ov-a:empty, .ov-b:empty { display: none; }
-.overlay .w.on { color: #ffd60a; }  /* karaoke: spoken words, same as text-render */
+/* live composite layers: PNGs drawn by bin/text-render — the very same images the export burns in */
+.layers { position: absolute; pointer-events: none; }
+.layers img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.layers img:not([src]) { display: none; }
+video { transition: none; }
 .reel-banner { background: var(--hi); padding: 2px 8px; border-radius: 6px; font-weight: 600; }
 .reel-banner button { padding: 1px 8px; margin-left: 6px; }
 .player-bar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 6px 2px; }
@@ -151,3 +146,8 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 .hl-bar .title { flex: 1; font-size: 15px; font-weight: 700; min-width: 200px; }
 .hl-out video { width: 100%; max-height: 40vh; background: #000; border-radius: 8px; margin-top: 8px; }
 @media (max-width: 900px) { .hl-grid { grid-template-columns: 1fr; } }
+.hl-edit .clip .cl { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+.hl-edit .clip .cl:last-of-type { border-bottom: 0; }
+.hl-edit .clip .cl [contenteditable] { outline: none; border-radius: 4px; padding: 1px 4px; }
+.hl-edit .clip .cl [contenteditable]:focus { background: var(--bg); box-shadow: 0 0 0 1px var(--accent); }
+.hl-edit .clip .cl .tr:empty::before { content: "（無譯文）"; color: var(--muted); }
