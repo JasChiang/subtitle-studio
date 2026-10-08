@@ -280,3 +280,12 @@ dialog::backdrop { background: rgba(10,10,12,.6); }
 .hl-edit .edge, .hl-edit .clip-move { opacity: .35; transition: opacity .12s; }
 .hl-edit .clip:hover .edge, .hl-edit .clip:hover .clip-move, .hl-edit .clip:focus-within .edge, .hl-edit .clip:focus-within .clip-move { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .hl-edit .edge, .hl-edit .clip-move { transition: none; } }
+
+/* full-video export dialog */
+.dlg .choice { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-m); cursor: pointer; font-size: 13px; color: var(--muted); }
+.dlg .choice b { color: var(--ink); font-weight: 600; }
+.dlg .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.dlg .choice input { margin-top: 3px; accent-color: var(--accent); }
+#vxKaraokeRow.off { opacity: .45; }
+.vx-list { display: grid; gap: 6px; }
+.vx-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }

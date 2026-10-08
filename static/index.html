@@ -112,6 +112,7 @@
             <a class="btn" data-export="vtt">VTT</a>
             <a class="btn" data-export="json">字級 JSON</a>
           </div>
+          <button id="videoExportBtn">輸出整支影片</button>
         </div>
         <div class="cues-wrap">
           <table id="cues">
@@ -176,6 +177,24 @@
       <button id="createBtn" class="primary" value="default">建立並開始轉錄</button>
     </div>
     <div id="newErr" class="err"></div>
+  </form>
+</dialog>
+
+<dialog id="exportDlg">
+  <form method="dialog" class="dlg">
+    <h2>輸出整支影片（含字幕）</h2>
+    <label class="choice"><input type="radio" name="vxSubs" value="soft" checked>
+      <span><b>內嵌字幕軌</b>：影片和聲音直接複製、不重新編碼，幾十秒就好，畫質不變。播放器可以開關字幕，之後也能再改。沒有逐字變色。</span></label>
+    <label class="choice"><input type="radio" name="vxSubs" value="burn">
+      <span><b>燒進畫面</b>：字幕變成畫面的一部分，任何播放器、平台都看得到，樣式跟預覽一樣。要重新編碼整支影片，需要幾分鐘。</span></label>
+    <label class="toggle" id="vxKaraokeRow"><input type="checkbox" id="vxKaraoke"> 逐字變色（只有燒進畫面時有效；整支影片字很多，會再慢一些）</label>
+    <p class="hint">雙語順序依「設定」裡的「雙語字幕順序」。輸出檔放在專案資料夾的 exports/。</p>
+    <div class="row gap end">
+      <button value="cancel" class="ghost">關閉</button>
+      <button id="vxStart" class="primary" value="default">開始輸出</button>
+    </div>
+    <h2 class="list-title">已輸出的影片</h2>
+    <div id="vxList" class="vx-list"></div>
   </form>
 </dialog>
 

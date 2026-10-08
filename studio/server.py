@@ -261,6 +261,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_text(highlights.summary_markdown(s), f"{Path(p.meta['name']).stem}.摘要.md",
                                           "text/markdown; charset=utf-8")
                 return self.send_json(s or {})
+            if sub == "exports":
+                if len(parts) == 4:
+                    return self.send_json(highlights.list_exports(p))
+                f = p.dir / "exports" / parts[4]
+                if not re.fullmatch(r"full-[\w-]+\.(mp4|srt)", parts[4]) or not f.exists():
+                    raise KeyError
+                return self.send_file(f, download_name=f"{Path(p.meta['name']).stem}.{parts[4]}")
             if sub == "highlights":
                 if len(parts) == 4:
                     return self.send_json(highlights.list_plans(p))
@@ -332,6 +339,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if sub == "highlights":
                 start_task(p, "highlight", lambda: highlights.plan_highlight(p, b))
+                return self.send_json({"ok": True})
+            if sub == "export-video":
+                start_task(p, "render_full", lambda: highlights.render_full(p, b))
                 return self.send_json({"ok": True})
             if sub == "options":
                 m = p.meta

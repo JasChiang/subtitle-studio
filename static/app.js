@@ -15,7 +15,7 @@ const STAGE_INFO = {
   correct: ["校正", "用參考稿修正 ASR 文字（不動時間碼）"],
   cues: ["斷句", "對齊回字級時間碼，依語意切成字幕條"],
   translate: ["翻譯", "逐條翻譯"],
-  summary: ["摘要", ""], highlight: ["剪輯企劃", ""], render: ["輸出精華影片", ""],
+  summary: ["摘要", ""], highlight: ["剪輯企劃", ""], render: ["輸出精華影片", ""], render_full: ["輸出整支影片", ""],
 };
 const OPT_FIELDS = [
   ["locale", "ASR 語言", "locale"], ["context", "影片脈絡（選填）", "textarea"], ["glossary", "詞彙表（選填）", "textarea"],
@@ -567,6 +567,7 @@ $$(".views button").forEach((b) => b.onclick = () => {
 const pidURL = () => `/api/projects/${encodeURIComponent(S.cur.id)}`;
 async function refreshExtras() {
   if (!S.cur) return;
+  if (vxDlg?.open) loadExports();
   loadSummary();
   await loadPlans();
   if (S.openNewestPlan && S.plans?.length) {
@@ -920,5 +921,26 @@ window.addEventListener("hashchange", () => {  // links like #<project id> open 
   const id = decodeURIComponent(location.hash.slice(1));
   if (id && id !== S.cur?.id) selectProject(id);
 });
+
+// ───────── full-video export
+const vxDlg = $("#exportDlg");
+async function loadExports() {
+  const list = await api(pidURL() + "/exports").catch(() => []);
+  $("#vxList").innerHTML = list.map((x) => `<div class="vx-item"><span>${esc(x.subs)}　${new Date(x.at * 1000).toLocaleString("zh-TW", { hour12: false })}　${(x.size / 1e6).toFixed(0)} MB</span>
+      <a class="btn" href="${pidURL()}/exports/${encodeURIComponent(x.file)}">下載 MP4</a></div>`).join("")
+    || `<p class="hint">還沒有輸出過。</p>`;
+}
+$("#videoExportBtn").onclick = () => { if (!S.cur) return; loadExports(); vxDlg.showModal(); };
+const vxSync = () => { const burn = $('input[name="vxSubs"]:checked').value === "burn"; $("#vxKaraoke").disabled = !burn; $("#vxKaraokeRow").classList.toggle("off", !burn); };
+$$('input[name="vxSubs"]').forEach((r) => r.addEventListener("change", vxSync));
+$("#vxStart").onclick = async (e) => {
+  e.preventDefault();
+  if (!needIdle()) return;
+  if (S.dirty) await saveCues();
+  const subs = $('input[name="vxSubs"]:checked').value;
+  await startTask("/export-video", { subs, karaoke: subs === "burn" && $("#vxKaraoke").checked });
+  vxDlg.close();
+};
+vxSync();
 
 boot();

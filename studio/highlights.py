@@ -512,12 +512,87 @@ def ffconcat(path: Path, events: list[tuple[float, float, str]], total: float, b
 
 def render_highlight(p: Project, hid: str):
     plan = p.read(f"highlights/{hid}.json")
+    out = p.dir / "highlights" / f"{hid}.mp4"
+    total, subs_mode = render_plan(p, plan, out, p.dir / "highlights" / f"{hid}.srt",
+                                   p.dir / "highlights" / f"{hid}_work", "精華")
+    plan["rendered"] = {"file": out.name, "at": time.time(), "duration": round(total, 2), "subs": subs_mode}
+    p.write(f"highlights/{hid}.json", plan)
+
+
+def render_full(p: Project, req: dict) -> Path:
+    """The whole video with this project's subtitles: a toggleable track (no re-encode) or burned in."""
+    mode = req.get("subs", "soft")
+    cues = cues_of(p)
+    duration = p.meta.get("duration") or float(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p.media)]))
+    exports = p.dir / "exports"
+    exports.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out = exports / f"full-{mode}-{stamp}.mp4"
+    srt = exports / f"full-{stamp}.srt"
+    if mode == "soft":
+        tr_first = p.options.get("sub_order", "tr-first") != "src-first"
+        srt.write_text(reel_srt(reel_subs([(0.0, duration, 0, False, 1.0)], cues, tr_first, False)))
+        p.log(f"輸出完整影片：內嵌字幕軌（影音直接複製、不重新編碼），{len(cues)} 條字幕")
+        tmp = out.with_suffix(".part.mp4")
+        proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(p.media), "-i", str(srt),
+                               "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:s", "-c", "copy", "-c:s", "mov_text",
+                               "-metadata:s:s:0", "language=chi", "-dn", "-write_tmcd", "0", "-movflags", "+faststart", str(tmp)],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError("ffmpeg 失敗：" + proc.stderr[-600:])
+        tmp.replace(out)
+    else:
+        plan = {"hook": [], "chapters": [{"title": "", "clips": [{"start": 0.0, "end": duration}]}],
+                "options": {"cards": False, "zoom": False, "subs": "burn"}}
+        karaoke = bool(req.get("karaoke"))
+        render_plan(p, plan, out, srt, exports / f"work-{stamp}", "完整影片", karaoke=karaoke, cleanup=True)
+        return out
+    p.log(f"完整影片完成：{out.name}（{out.stat().st_size / 1e6:.0f} MB）")
+    return out
+
+
+def list_exports(p: Project) -> list[dict]:
+    d = p.dir / "exports"
+    if not d.exists():
+        return []
+    return [{"file": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime,
+             "subs": "內嵌字幕軌" if "-soft-" in f.name else "燒進畫面"}
+            for f in sorted(d.glob("full-*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if not f.name.endswith(".part.mp4")]
+
+
+def probe_fps(path: Path) -> str:
+    r = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                 "stream=avg_frame_rate", "-of", "csv=p=0", str(path)]).decode().strip()
+    return r if r and r != "0/0" else "30000/1001"
+
+
+def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4):
+    """Run bin/text-render on several batches at once — a full hour of word-by-word subtitles is thousands
+    of images."""
+    from concurrent.futures import ThreadPoolExecutor
+    size = max(1, -(-len(items) // procs))
+    chunks = [items[k:k + size] for k in range(0, len(items), size)]
+
+    def run(chunk):
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "items": chunk}).encode(),
+                       check=True, capture_output=True)
+
+    with ThreadPoolExecutor(max_workers=procs) as ex:
+        list(ex.map(run, chunks))
+
+
+def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, label: str,
+                karaoke: bool | None = None, cleanup: bool = False) -> tuple[float, str]:
+    """Cut / concat the plan's pieces from the source, burn subtitles / chapter cards / tags as PNG overlays
+    drawn by bin/text-render, keep the source frame rate. Returns (duration, subtitle mode)."""
     cues = cues_of(p)
     if not RENDER_BIN.exists():
         raise RuntimeError("bin/text-render 不存在，先跑 ./setup.sh")
     pieces = timeline(plan)
     W, H = probe_size(p.media)
-    work = p.dir / "highlights" / f"{hid}_work"
+    fps = probe_fps(p.media)
     work.mkdir(parents=True, exist_ok=True)
     for f in work.glob("*.png"):
         f.unlink()
@@ -532,11 +607,11 @@ def render_highlight(p: Project, hid: str):
     # overlay images
     items = [{"out": str(work / "blank.png"), "kind": "blank", "lines": []}]
     sub_mode = plan.get("options", {}).get("subs", "burn")   # burn | soft | none
-    subs = reel_subs(pieces, cues, p.options.get("sub_order", "tr-first") != "src-first",
-                     bool(p.options.get("karaoke")) and sub_mode == "burn")
+    kar = bool(p.options.get("karaoke")) if karaoke is None else karaoke
+    subs = reel_subs(pieces, cues, p.options.get("sub_order", "tr-first") != "src-first", kar and sub_mode == "burn")
     sub_ev, card_ev, tag_ev = [], [], []
     for i, (a, b, lines) in enumerate(subs if sub_mode == "burn" else []):
-        f = str(work / f"sub_{i:04d}.png")
+        f = str(work / f"sub_{i:05d}.png")
         items.append({"out": f, "kind": "sub", "lines": lines})
         sub_ev.append((a, b, f))
     blur_spans = []
@@ -547,14 +622,14 @@ def render_highlight(p: Project, hid: str):
         t0 = starts[idx[0]]
         t1 = starts[idx[-1]] + pieces[idx[-1]][1] - pieces[idx[-1]][0]
         cd = min(CARD, t1 - t0)
-        fc, ft = str(work / f"card_{ci:02d}.png"), str(work / f"tag_{ci:02d}.png")
-        items += [{"out": fc, "kind": "card", "lines": [ch["title"], ch.get("title_en", "")]},
+        fc_, ft = str(work / f"card_{ci:02d}.png"), str(work / f"tag_{ci:02d}.png")
+        items += [{"out": fc_, "kind": "card", "lines": [ch["title"], ch.get("title_en", "")]},
                   {"out": ft, "kind": "tag", "lines": [ch["title"]]}]
-        card_ev.append((t0, t0 + cd, fc))
+        card_ev.append((t0, t0 + cd, fc_))
         tag_ev.append((t0 + cd, t1, ft))
         blur_spans.append((t0, t0 + cd))
-    subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "items": items}).encode(),
-                   check=True, capture_output=True)
+    p.log(f"  繪製 {len(items) - 1} 張字幕／字卡圖")
+    draw_overlays(items, W, H)
     blank = str(work / "blank.png")
     tracks = []
     for name, ev in (("subs", sub_ev), ("cards", card_ev), ("tags", tag_ev)):
@@ -567,7 +642,7 @@ def render_highlight(p: Project, hid: str):
     for i, (a, b, ci, first, z) in enumerate(pieces):
         d = b - a
         args += ["-ss", f"{a:.3f}", "-t", f"{d:.3f}", "-i", str(p.media)]
-        v = f"[{i}:v]setpts=PTS-STARTPTS,fps=30000/1001,scale={W}:{H},setsar=1,format=yuv420p"
+        v = f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},scale={W}:{H},setsar=1,format=yuv420p"
         if z != 1.0:
             v += f",crop=iw/{z}:ih/{z}:(iw-iw/{z})*0.45:(ih-ih/{z})*0.35,scale={W}:{H}:flags=lanczos,setsar=1"
         fc += v + f"[v{i}];"
@@ -586,20 +661,18 @@ def render_highlight(p: Project, hid: str):
         fc += f"[{n + k}:v]format=rgba[o{k}];[{cur}][o{k}]overlay=eof_action=pass:format=auto[x{k}];"
         cur = f"x{k}"
     fc = fc.rstrip(";")
-    srt_path = p.dir / "highlights" / f"{hid}.srt"
     srt_path.write_text(reel_srt(subs))
     soft = []
     if sub_mode == "soft":  # a subtitle track players can toggle (no karaoke in soft subs)
         args += ["-i", str(srt_path)]
         soft = ["-map", f"{n + len(tracks)}:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=chi"]
-    out = p.dir / "highlights" / f"{hid}.mp4"
     tmp = out.with_suffix(".part.mp4")
     enc = ["-c:v", "h264_videotoolbox", "-b:v", "8M"] if hw_encoder() else ["-c:v", "libx264", "-crf", "19",
                                                                              "-preset", "medium"]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", fc, "-map", f"[{cur}]",
-           "-map", "[ac]", *soft, *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn", "-map_chapters", "-1", "-movflags", "+faststart",
-           "-progress", "pipe:1", "-nostats", str(tmp)]
-    p.log(f"輸出精華：{n} 段、{len(subs)} 條字幕、{total:.1f} 秒（{'硬體' if hw_encoder() else '軟體'}編碼）")
+           "-map", "[ac]", *soft, *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn",
+           "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(tmp)]
+    p.log(f"輸出{label}：{n} 段、{len(subs)} 條字幕、{total:.1f} 秒（{'硬體' if hw_encoder() else '軟體'}編碼，{fps} fps）")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     for line in proc.stdout:
         if line.startswith("out_time_us=") and line.strip().split("=")[1].isdigit():
@@ -608,9 +681,11 @@ def render_highlight(p: Project, hid: str):
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg 失敗：" + err[-600:])
     tmp.replace(out)
-    plan["rendered"] = {"file": out.name, "at": time.time(), "duration": round(total, 2), "subs": sub_mode}
-    p.write(f"highlights/{hid}.json", plan)
-    p.log(f"精華影片完成：{out.name}（{out.stat().st_size / 1e6:.1f} MB）")
+    if cleanup:
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+    p.log(f"{label}完成：{out.name}（{out.stat().st_size / 1e6:.1f} MB）")
+    return total, sub_mode
 
 
 def reel_srt(subs) -> str:
