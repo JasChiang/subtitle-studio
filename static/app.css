@@ -163,3 +163,4 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 #rbMarks span::after { content: attr(data-t); position: absolute; top: -2px; left: 4px; font-size: 10px; white-space: nowrap; color: var(--muted); }
 #rbLabel { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td.n .est { margin-left: 2px; cursor: help; }
+td.txt [contenteditable], td.tr [contenteditable], .hl-edit .clip .cl [contenteditable] { white-space: pre-wrap; }

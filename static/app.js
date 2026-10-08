@@ -21,6 +21,8 @@ const OPT_FIELDS = [
   ["locale", "ASR 語言", "locale"], ["context", "影片脈絡（選填）", "textarea"], ["glossary", "詞彙表（選填）", "textarea"],
   ["ref_model", "參考稿模型（看影片）", "text"], ["text_model", "校正／翻譯模型", "text"],
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
+  ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
+  ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字高亮（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
   ["target_lang", "目標語言", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
@@ -416,7 +418,7 @@ function showLayer(el, url) {  // swap only once the new image is decoded → no
 function cueLines(c, t) {  // same rules as highlights.reel_subs
   const opts = { ...S.defaults.options, ...(S.cur?.options || {}) };
   let src = c.text;
-  if (opts.karaoke && c.words?.length) {
+  if (opts.karaoke && c.words?.length && !c.dialog) {
     const spoken = c.words.filter((w) => w.s <= t + 1e-6);
     if (spoken.length) { const pre = joinWords(spoken); src = pre + "\x01" + joinWords(c.words).slice(pre.length); }
   }
@@ -426,7 +428,7 @@ function cueLines(c, t) {  // same rules as highlights.reel_subs
 function prefetchCue(c) {
   if (!c || !S.cur) return;
   const opts = { ...S.defaults.options, ...(S.cur.options || {}) };
-  const times = opts.karaoke && c.words?.length ? [c.start - 1, ...c.words.map((w) => w.s)] : [c.start];
+  const times = opts.karaoke && c.words?.length && !c.dialog ? [c.start - 1, ...c.words.map((w) => w.s)] : [c.start];
   times.forEach((t) => preload(overlayURL("sub", cueLines(c, t))));
 }
 let lastCue = -2;

@@ -228,7 +228,7 @@ def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = F
             if e - s <= 0.12:
                 continue
             ws = c.get("words") or []
-            if not karaoke or not ws:
+            if not karaoke or not ws or c.get("dialog"):
                 push(off + s - pa, off + e - pa, lines_for(c, c["text"]))
                 continue
             full = join_tokens([w["t"] for w in ws])

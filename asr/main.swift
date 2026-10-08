@@ -38,6 +38,11 @@ struct AppleASR {
             print(supported.map { $0.identifier(.bcp47) }.sorted().joined(separator: "\n"))
             return
         }
+        if let i = args.firstIndex(of: "--energy"), i + 1 < args.count {
+            // 10 ms RMS loudness (dBFS, Float32 little-endian) of a 16 kHz mono file → stdout
+            do { try energy(url: URL(fileURLWithPath: args[i + 1])) } catch { eprint("ERROR \(error)"); exit(1) }
+            return
+        }
         guard let path = args.first else {
             eprint("usage: apple-asr <audio-file> [--locale en-US] [--list-locales]"); exit(2)
         }
@@ -46,6 +51,29 @@ struct AppleASR {
         } catch {
             eprint("ERROR \(error.localizedDescription)"); exit(1)
         }
+    }
+
+    static func energy(url: URL) throws {
+        let file = try AVAudioFile(forReading: url)
+        let fmt = file.processingFormat
+        let hop = AVAudioFrameCount(fmt.sampleRate / 100)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: hop * 1000) else { return }
+        var out = Data()
+        while file.framePosition < file.length {
+            try file.read(into: buf, frameCount: min(buf.frameCapacity, AVAudioFrameCount(file.length - file.framePosition)))
+            if buf.frameLength == 0 { break }
+            let ch = buf.floatChannelData![0]
+            var i = 0
+            while i < Int(buf.frameLength) {
+                let n = min(Int(hop), Int(buf.frameLength) - i)
+                var sum: Float = 0
+                for k in 0..<n { sum += ch[i + k] * ch[i + k] }
+                var db = 10 * log10(sum / Float(max(n, 1)) + 1e-10)
+                withUnsafeBytes(of: &db) { out.append(contentsOf: $0) }
+                i += n
+            }
+        }
+        FileHandle.standardOutput.write(out)
     }
 
     static func run(url: URL, localeID: String, supported: [Locale]) async throws {

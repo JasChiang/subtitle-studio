@@ -33,6 +33,9 @@ DEFAULT_OPTIONS = {
     "drop_fillers": True,          # um / uh / 嗯 / 呃
     "semantic_breaks": True,       # Gemini watches/listens and picks subtitle breaks; rules only as fallback
     "seg_thinking": "low",         # Gemini thinking level for segmentation: low / medium / high
+    "backchannels": "omit",        # omit | keep — listener's mm-hmm / yeah that carry no information
+    "energy_snap": True,           # refine word boundaries with the audio loudness (pauses, onsets)
+    "correct_with_audio": True,    # correction also listens to the audio of each chunk
     "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
     "max_duration": 6.5,
     "gap_break": 0.7,
@@ -380,7 +383,9 @@ def stage_correct(p: Project):
     system = (
         "You fix speech-recognition (ASR) errors in a transcript. You get ASR segments (with their time "
         "range) and an INDEPENDENT REFERENCE transcript of the same audio made by a video-understanding "
-        "model that watched the video. For every ASR segment return the corrected text.\n"
+        "model that watched the video" + (", plus the AUDIO itself (its start time in the video is given) — "
+        "LISTEN to decide every disputed word, and never change a word the audio clearly supports"
+        if o.get("correct_with_audio", True) else "") + ". For every ASR segment return the corrected text.\n"
         "Rules:\n"
         "- Fix misheard words, homophones, wrong word boundaries, names, brands and technical terms. When the "
         "ASR and the REFERENCE disagree, prefer whichever is more plausible in context; the REFERENCE is "
@@ -430,9 +435,19 @@ def stage_correct(p: Project):
                      for i in idxs]
         prompt = ("REFERENCE:\n" + ("\n".join(ref_lines) or "(none)") + "\n\nASR SEGMENTS:\n"
                   + "\n".join(asr_lines))
+        parts, upl = [{"text": prompt}], None
+        if o.get("correct_with_audio", True):
+            a0 = max(0.0, a)
+            clip = p.dir / "reference" / f"audio_{k:03d}.m4a"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a0:.3f}", "-t", f"{b - a0:.3f}", "-i",
+                            str(p.media), "-vn", "-c:a", "aac", "-b:a", "48k", "-ac", "1", str(clip)], check=True)
+            upl = gemini.upload_file(clip, "audio/mp4", log=p.log)
+            clip.unlink(missing_ok=True)
+            parts = [{"file_data": {"mime_type": "audio/mp4", "file_uri": upl["uri"]}},
+                     {"text": f"The audio starts at {fmt_mmss(a0)} of the video.\n\n" + prompt}]
         got = {}
         for attempt in range(3):
-            data, served = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system,
+            data, served = gemini.generate_json(o["text_model"], parts, system=system,
                                                 schema=CORR_SCHEMA, usage=p.usage, log=p.log, max_tokens=65536)
             got = {}
             for item in data.get("segments", []):
@@ -443,6 +458,8 @@ def stage_correct(p: Project):
             if len(missing) <= max(1, len(idxs) // 50):
                 break
             p.log(f"  校正區塊 {k + 1}：缺 {len(missing)} 段，重試")
+        if upl:
+            gemini.delete_file(upl["name"])
         for i in idxs:
             result[i] = got.get(i, segs[i]["text"])
         with lock:
@@ -622,16 +639,29 @@ def heuristic_groups(words: list[dict], o: dict) -> list[list[dict]]:
     return cues
 
 
-def finalize_cues(cues: list[list[dict]]) -> list[dict]:
-    # a cue whose successor starts almost at once (an overlapping "Yeah." from the other speaker) can't be
-    # shown on its own — fold it into the next cue
-    merged: list[list[dict]] = []
-    for ws in reversed(cues):
-        if merged and merged[0][0]["s"] - ws[0]["s"] < 0.3:
-            merged[0] = ws + merged[0]
+def finalize_cues(groups: list[list[dict]]) -> list[dict]:
+    # 1. drop listener backchannels Gemini marked as carrying no information
+    groups = [g for g in groups if not g[0].get("line", {}).get("omit")]
+    # 2. overlapping speech from another speaker → one two-speaker cue ("- A" / "- B"), shown together
+    items: list[dict] = []
+    for g in groups:
+        meta = g[0].get("line") or {}
+        prev = items[-1] if items else None
+        if prev and meta.get("with_prev") and not prev["parts"] and \
+                meta.get("speaker") != (prev["ws"][0].get("line") or {}).get("speaker"):
+            prev["parts"] = [prev["ws"], g]
+            prev["ws"] = prev["ws"] + g
         else:
-            merged.insert(0, ws)
-    cues = merged
+            items.append({"ws": g, "parts": None})
+    # 3. a cue whose successor starts almost at once can't be shown on its own — fold it into the next one
+    merged: list[dict] = []
+    for it in reversed(items):
+        if merged and merged[0]["ws"][0]["s"] - it["ws"][0]["s"] < 0.3 and not merged[0]["parts"] and not it["parts"]:
+            merged[0] = {"ws": it["ws"] + merged[0]["ws"], "parts": None}
+        else:
+            merged.insert(0, it)
+    cues = [it["ws"] for it in merged]
+    parts = [it["parts"] for it in merged]
 
     LEAD, HOLD, MIN_SHOW, GAP = 0.1, 0.6, 1.0, 0.04
     # pass 1 — starts: a little lead-in, but only into silence (never before the previous line's last word)
@@ -648,15 +678,77 @@ def finalize_cues(cues: list[list[dict]]) -> list[dict]:
         if end - start < MIN_SHOW:
             end = min(start + MIN_SHOW, limit)
         end = max(end, min(ws[-1]["e"], limit), start + 0.05)
-        out.append({"start": round(start, 3), "end": round(end, 3),
-                    "text": join_tokens([w["t"] for w in ws]),
+        text = ("- " + join_tokens([w["t"] for w in parts[i][0]]) + "\n- " + join_tokens([w["t"] for w in parts[i][1]])
+                if parts[i] else join_tokens([w["t"] for w in ws]))
+        out.append({"start": round(start, 3), "end": round(end, 3), "text": text, "dialog": bool(parts[i]),
                     "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3)} for w in ws],
                     "spk": bool(ws[0].get("spk")), "est": sum(1 for w in ws if w.get("est")) >= 2})
     return out
 
 
-SEG_SCHEMA = {"type": "object", "properties": {"breaks": {"type": "array", "items": {"type": "integer"}}},
-              "required": ["breaks"]}
+def load_energy(p: Project):
+    """10 ms loudness (dBFS) of audio.wav, computed once by bin/apple-asr --energy."""
+    import array
+    f = p.dir / "energy.f32"
+    if not f.exists():
+        data = subprocess.run([str(ASR_BIN), "--energy", str(p.dir / "audio.wav")], capture_output=True,
+                              check=True).stdout
+        f.write_bytes(data)
+    a = array.array("f")
+    a.frombytes(f.read_bytes())
+    return a
+
+
+def snap_to_energy(words: list[dict], db) -> int:
+    """Apple's word times are coarse (0.06 s steps) and a pause is usually absorbed into the word before it.
+    Between each pair of words, find the pause in the loudness and put the boundary there: the earlier word
+    ends where the sound stops, the next one starts where it resumes. Returns how many boundaries moved."""
+    if not db:
+        return 0
+    n, moved = len(db), 0
+    for a, b in zip(words, words[1:]):
+        lo = int(max(a["s"] + 0.05, a["e"] - 0.8) * 100)
+        hi = int(min(b["s"] + 0.35, max(b["e"] - 0.03, b["s"])) * 100)
+        if hi - lo < 12 or hi >= n:
+            continue
+        # local threshold: room tone differs per recording / scene, so judge a pause against the speech
+        # around THIS pair of words: quieter than (loudest nearby − 14 dB) and clearly above the quietest
+        around = db[max(0, int(a["s"] * 100)):min(n, int(b["e"] * 100) + 1)]
+        if not around:
+            continue
+        loud, quiet_min = max(around), min(around)
+        thr = max(loud - 14, quiet_min + 6)
+        if loud - quiet_min < 12:  # no real dip anywhere → nothing to snap to
+            continue
+        best, run_start = None, None
+        for k in range(lo, hi + 1):
+            quiet = k < n and db[k] < thr
+            if quiet and run_start is None:
+                run_start = k
+            if (not quiet or k == hi) and run_start is not None:
+                # only a pause that ENDS inside the range counts: the sound must resume (the next word's onset);
+                # a quiet run still going at the range end is a pause inside / after the next word instead
+                if not quiet and k - run_start >= 12 and (best is None or k - run_start > best[1] - best[0]):
+                    best = (run_start, k)
+                run_start = None
+        if not best:
+            continue
+        p0, p1 = best[0] / 100, best[1] / 100
+        if p0 <= a["s"] + 0.04 or p1 >= max(b["e"], b["s"] + 0.35):
+            continue
+        a["e"] = round(p0 + 0.02, 3)
+        b["s"] = round(min(p1, b["e"] - 0.02) if b["e"] > p1 else p1, 3)
+        b["e"] = max(b["e"], b["s"] + 0.04)
+        moved += 1
+    return moved
+
+
+SEG_SCHEMA = {"type": "object", "properties": {"lines": {"type": "array", "items": {"type": "object", "properties": {
+    "last": {"type": "integer", "description": "index of the last word of this subtitle line"},
+    "speaker": {"type": "string"},
+    "with_prev": {"type": "boolean"},
+    "omit": {"type": "boolean"}}, "required": ["last", "speaker", "with_prev", "omit"]}}},
+    "required": ["lines"]}
 
 
 def seg_windows(words: list[dict], minutes: float) -> list[list[int]]:
@@ -676,19 +768,31 @@ def seg_windows(words: list[dict], minutes: float) -> list[list[int]]:
 
 
 def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
-    """Gemini watches and listens to each stretch of the video together with the numbered transcript words,
-    and splits them into subtitle lines the way a human subtitler would — by rhythm, pauses and meaning."""
+    """Gemini watches and listens to each stretch of the video together with the numbered, timed words, and
+    splits them into subtitle lines the way a human subtitler would — by rhythm, pauses and meaning. It also
+    says who speaks each line, which lines overlap with the other speaker (shown together as a two-speaker
+    subtitle) and which listener backchannels to leave out. Line metadata rides on the line's first word."""
     cjk, max_chars = cue_limits(words, o)
     windows = seg_windows(words, o["chunk_minutes"])
     has_video = media_has_video(p)
     (p.dir / "segment").mkdir(exist_ok=True)
+    omit_rule = ("true for a short listener backchannel or acknowledgement (mm-hmm, uh-huh, yeah, right, "
+                 "嗯、對) said while the other person is talking and carrying no information; false for anything "
+                 "meaningful (e.g. a 'No.' that answers a question, a real reaction, or the only speech at that "
+                 "moment)") if o.get("backchannels", "omit") == "omit" else "always false"
     system = (
-        "You are a professional subtitler. Watch and listen to the clip, then split the given transcript "
-        "words into subtitle lines exactly as a skilled human subtitler would for this video: follow the "
-        "speaker's rhythm, pauses, emphasis and meaning, so every line reads naturally on screen and appears "
-        f"in step with the speech. A comfortable line is roughly {max_chars} characters or less. Words are "
-        "given as [index@seconds]word, with seconds relative to the start of the clip. Return `breaks`: the "
-        "indices of words AFTER which a new subtitle line starts, in ascending order."
+        "You are a professional subtitler. Watch and listen to the clip, then split ALL the given transcript "
+        "words, in order, into subtitle lines exactly as a skilled human subtitler would for this video: follow "
+        "the speaker's rhythm, pauses, emphasis and meaning, so every line reads naturally and appears in step "
+        f"with the speech. A comfortable line is roughly {max_chars} characters or less, and each line should "
+        "stay on screen long enough to be read comfortably — as a guide about a second or more — unless the "
+        "speaker clearly pauses. Words are given as [index@seconds]word (seconds from the start of the clip).\n"
+        "For each line, in order, return:\n"
+        "- `last`: index of the line's last word (lines are consecutive; the last line ends at the last word)\n"
+        "- `speaker`: who says it (a name if the video makes it clear, otherwise A / B …)\n"
+        "- `with_prev`: true only when this line is said by a DIFFERENT speaker AT THE SAME TIME as the "
+        "previous line (overlapping speech), so both belong on screen together as one two-speaker subtitle\n"
+        f"- `omit`: {omit_rule}"
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
     done, result = [0], {}
@@ -706,35 +810,49 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
                 data, _ = gemini.generate_json(
                     o["text_model"], [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": text}],
                     system=system, schema=SEG_SCHEMA, low_res=True, usage=p.usage, log=p.log,
-                    max_tokens=32768, thinking=o.get("seg_thinking") or None)
+                    max_tokens=65536, thinking=o.get("seg_thinking") or None)
             finally:
                 gemini.delete_file(f["name"])
-            brks = {int(x) for x in data.get("breaks", []) if idxs[0] <= int(x) < idxs[-1]}
-            if not brks and len(idxs) > 30:
-                raise ValueError("no breaks returned")
+            lines = sorted((ln for ln in data.get("lines", []) if idxs[0] <= int(ln.get("last", -1)) <= idxs[-1]),
+                           key=lambda ln: int(ln["last"]))
+            if not lines and len(idxs) > 30:
+                raise ValueError("no lines returned")
         except Exception as e:
             p.log(f"  語意斷句區塊 {k + 1} 失敗，這段改用規則斷句：{e}")
             result[k] = heuristic_groups([words[i] for i in idxs], o)
             return
         finally:
             proxy.unlink(missing_ok=True)
-        groups, cur = [], []
-        for i in idxs:
-            if cur and i - 1 in brks:
-                groups.append(cur)
-                cur = []
-            cur.append(words[i])
-        if cur:
-            groups.append(cur)
+        groups, start = [], idxs[0]
+        for ln in lines:
+            last = int(ln["last"])
+            if last < start:
+                continue
+            g = [words[i] for i in range(start, last + 1)]
+            g[0]["line"] = {"speaker": str(ln.get("speaker", "")), "with_prev": bool(ln.get("with_prev")),
+                            "omit": bool(ln.get("omit"))}
+            groups.append(g)
+            start = last + 1
+        if start <= idxs[-1]:
+            groups.append([words[i] for i in range(start, idxs[-1] + 1)])
         # safety net only for clearly broken output (a "line" far too long to display)
         out = []
         for g in groups:
             broken = len(join_tokens([w["t"] for w in g])) > max_chars * 2.5
-            out += heuristic_groups(g, o) if broken else [g]
+            if broken:
+                meta = g[0].get("line")
+                sub = heuristic_groups(g, o)
+                if meta:
+                    sub[0][0]["line"] = meta
+                out += sub
+            else:
+                out.append(g)
         result[k] = out
         done[0] += 1
         p.status(progress=done[0] / len(windows))
-        p.log(f"  語意斷句 {k + 1}/{len(windows)}：{len(out)} 條")
+        omitted = sum(1 for g in out if g[0].get("line", {}).get("omit"))
+        overl = sum(1 for g in out if g[0].get("line", {}).get("with_prev"))
+        p.log(f"  語意斷句 {k + 1}/{len(windows)}：{len(out)} 行（重疊 {overl}、省略附和 {omitted}）")
 
     with ThreadPoolExecutor(max_workers=min(3, o["workers"])) as ex:
         list(ex.map(one, range(len(windows))))
@@ -753,9 +871,13 @@ def stage_cues(p: Project):
     segs = asr["segments"]
     for k in range(0, len(segs), win):
         words += align_window(segs[k:k + win], corr[k:k + win], seg_offset=k)
+    if o.get("energy_snap", True) and (p.dir / "audio.wav").exists():
+        moved = snap_to_energy(words, load_energy(p))
+        p.log(f"  依聲音音量校正字的邊界：{moved} 處")
     old_doc = p.read("cues.json") or {}
     old_cues = old_doc.get("cues", [])
     reuse = o.get("reuse_breaks", True) and not old_doc.get("edited") and old_cues and \
+        not any(c.get("dialog") for c in old_cues) and \
         [w["t"] for c in old_cues for w in (c.get("words") or [])] == [w["t"] for w in words]
     if reuse:
         p.log("  字詞與上次相同，沿用上次的斷句（只更新時間）")
@@ -804,7 +926,8 @@ def stage_translate(p: Project, only_missing: bool = False):
         "Each cue is one fragment of continuous speech. Translate EACH cue so its translation covers that "
         "cue's own content (do not move content into neighbouring cues), while the sequence reads naturally. "
         "Keep it concise for on-screen reading; no trailing full stop on a cue unless it is a question or "
-        "exclamation. Return every id."
+        "exclamation. A cue written as two lines starting with '- ' is two people speaking at once: translate "
+        "it as '－第一人的話　－第二人的話' on ONE line (full-width dash, each part translated). Return every id."
         + (f"\nGlossary / names: {glossary}" if glossary else "")
         + (f"\nSpeakers: {json.dumps(ref.get('speakers', {}), ensure_ascii=False)}" if ref.get("speakers") else "")
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
