@@ -527,8 +527,35 @@ def align_window(segs: list[dict], texts: list[str], seg_offset: int = 0) -> lis
         u["e"] = max(u.get("e", u["s"]), u["s"])
         u.setdefault("seg", seg_offset)
         last = u["s"]
+    unsqueeze(dst, w_lo, w_hi)
     return dst
 
+
+def unsqueeze(dst: list[dict], lo: float, hi: float, min_word: float = 0.04):
+    """Words the correction added where the ASR heard nothing get crammed into tiny gaps. Give such a run the
+    silence around it plus the tail of the previous word — but never move the START of a word the ASR timed
+    (that is what keeps subtitles and karaoke in sync). Runs that still don't fit are marked as estimated."""
+    i, n = 0, len(dst)
+    while i < n:
+        if dst[i]["e"] - dst[i]["s"] >= min_word:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and dst[j + 1]["e"] - dst[j + 1]["s"] < min_word:
+            j += 1
+        if j == i:  # a single short word is normal (a, I, the)
+            i += 1
+            continue
+        a0 = dst[i - 1]["s"] + 0.6 * (dst[i - 1]["e"] - dst[i - 1]["s"]) if i > 0 else lo
+        b0 = dst[j + 1]["s"] if j + 1 < n else hi
+        a0 = min(a0, dst[i]["s"])
+        if b0 - a0 > dst[j]["e"] - dst[i]["s"]:
+            if i > 0:
+                dst[i - 1]["e"] = min(dst[i - 1]["e"], a0)
+            spread(dst[i:j + 1], a0, b0)
+        for u in dst[i:j + 1]:
+            u["est"] = True
+        i = j + 1
 
 def spread(units: list[dict], lo: float, hi: float):
     total = sum(max(1, len(norm(u["t"]))) for u in units) or 1
@@ -606,18 +633,25 @@ def finalize_cues(cues: list[list[dict]]) -> list[dict]:
             merged.insert(0, ws)
     cues = merged
 
+    LEAD, HOLD, MIN_SHOW, GAP = 0.1, 0.6, 1.0, 0.04
+    # pass 1 — starts: a little lead-in, but only into silence (never before the previous line's last word)
+    starts = []
+    for i, ws in enumerate(cues):
+        floor = cues[i - 1][-1]["e"] + GAP if i else 0.0
+        starts.append(max(min(ws[0]["s"] - LEAD, ws[0]["s"]), min(floor, ws[0]["s"]), 0.0))
+    # pass 2 — ends: hold after the last word, readable minimum, never past the next line's start
     out = []
     for i, ws in enumerate(cues):
-        start, end = ws[0]["s"], ws[-1]["e"] + 0.15
-        nxt = cues[i + 1][0]["s"] if i + 1 < len(cues) else end + 1
-        end = min(end, nxt - 0.04)
-        if end - start < 0.8:
-            end = min(start + 0.8, nxt - 0.04)
-        end = min(max(end, start + 0.2), nxt - 0.02)
+        start = starts[i]
+        limit = starts[i + 1] - GAP if i + 1 < len(cues) else ws[-1]["e"] + 10
+        end = min(ws[-1]["e"] + HOLD, limit)
+        if end - start < MIN_SHOW:
+            end = min(start + MIN_SHOW, limit)
+        end = max(end, min(ws[-1]["e"], limit), start + 0.05)
         out.append({"start": round(start, 3), "end": round(end, 3),
                     "text": join_tokens([w["t"] for w in ws]),
                     "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3)} for w in ws],
-                    "spk": bool(ws[0].get("spk"))})
+                    "spk": bool(ws[0].get("spk")), "est": sum(1 for w in ws if w.get("est")) >= 2})
     return out
 
 
@@ -719,7 +753,17 @@ def stage_cues(p: Project):
     segs = asr["segments"]
     for k in range(0, len(segs), win):
         words += align_window(segs[k:k + win], corr[k:k + win], seg_offset=k)
-    if o.get("semantic_breaks", True) and words and os.environ.get("GEMINI_API_KEY"):
+    old_doc = p.read("cues.json") or {}
+    old_cues = old_doc.get("cues", [])
+    reuse = o.get("reuse_breaks", True) and not old_doc.get("edited") and old_cues and \
+        [w["t"] for c in old_cues for w in (c.get("words") or [])] == [w["t"] for w in words]
+    if reuse:
+        p.log("  字詞與上次相同，沿用上次的斷句（只更新時間）")
+        groups, k = [], 0
+        for c in old_cues:
+            groups.append(words[k:k + len(c["words"])])
+            k += len(c["words"])
+    elif o.get("semantic_breaks", True) and words and os.environ.get("GEMINI_API_KEY"):
         groups = semantic_groups(p, words, o)
     else:
         groups = heuristic_groups(words, o)

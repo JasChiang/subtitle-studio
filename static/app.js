@@ -228,7 +228,7 @@ async function loadCues() {
 function rowHTML(c, i) {
   const changed = c.asr && normTxt(c.asr) !== normTxt(c.text);
   return `<tr data-i="${i}">
-    <td class="n ${changed ? "chg" : ""}" title="${changed ? "ASR 原文：" + esc(c.asr) : ""}">${i + 1}</td>
+    <td class="n ${changed ? "chg" : ""}" title="${changed ? "ASR 原文：" + esc(c.asr) : ""}">${i + 1}${c.est ? `<span class="est" title="這句有 ASR 沒聽到、由校正補上的字，時間是估計的，建議對著影片檢查">⏱</span>` : ""}</td>
     <td class="tc"><input value="${fmt(c.start)}" data-f="start"></td>
     <td class="tc"><input value="${fmt(c.end)}" data-f="end"></td>
     <td class="txt"><div contenteditable="plaintext-only" data-f="text">${esc(c.text)}</div>${changed ? `<div class="asr">ASR：${esc(c.asr)}</div>` : ""}</td>

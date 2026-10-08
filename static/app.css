@@ -153,6 +153,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 .hl-edit .clip .cl .tr:empty::before { content: "（無譯文）"; color: var(--muted); }
 
 /* reel preview transport: the highlight's own timeline (not the source's) */
+.reel-bar[hidden] { display: none; }
 .reel-bar { display: flex; align-items: center; gap: 10px; padding: 6px 8px; margin-top: 6px; background: var(--hi); border-radius: 8px; }
 .reel-bar #rbPlay { width: 36px; }
 .rb-track { position: relative; flex: 1; height: 26px; display: flex; align-items: center; }
@@ -161,3 +162,4 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 #rbMarks span { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--chg); opacity: .7; }
 #rbMarks span::after { content: attr(data-t); position: absolute; top: -2px; left: 4px; font-size: 10px; white-space: nowrap; color: var(--muted); }
 #rbLabel { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.n .est { margin-left: 2px; cursor: help; }
