@@ -109,8 +109,9 @@ function confirmDiscard() { return window.confirm("有未存檔的字幕修改�
 function renderStages() {
   const done = new Set(S.cur.done || []);
   const st = S.cur.status || {};
-  $("#stageList").innerHTML = S.defaults.stages.map((s) => {
-    const checked = !done.has(s) || s === "cues" ? "checked" : "";
+  const allDone = S.defaults.stages.every((s) => done.has(s));
+  $("#stageList").innerHTML = (allDone ? `<p class="hint all-done">全部步驟都完成了。要重跑哪一步，再勾選它。</p>` : "") + S.defaults.stages.map((s) => {
+    const checked = !done.has(s) ? "checked" : "";  // only steps not done yet; re-running is a deliberate choice
     return `<label class="stage ${done.has(s) ? "done" : ""} ${st.state === "running" && st.stage === s ? "cur" : ""}">
       <input type="checkbox" value="${s}" ${checked}><span class="dot"></span><span><b>${STAGE_INFO[s][0]}</b> <span class="desc">${STAGE_INFO[s][1]}</span></span></label>`;
   }).join("");
