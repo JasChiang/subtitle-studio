@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 from . import gemini
-from .pipeline import HL_OFF, HL_ON, ROOT, Project, fmt_mmss, is_cjk_text, join_tokens, marked_source, ts
+from .pipeline import (HL_OFF, HL_ON, ROOT, Project, fmt_mmss, han_variant, is_cjk_text, join_tokens,
+                       marked_source, style_for, ts)
 
 RENDER_BIN = ROOT / "bin" / "text-render"
 CARD = 1.7     # seconds of blurred background + chapter card at the start of each chapter
@@ -62,7 +63,7 @@ def summarize(p: Project, req: dict):
     ref = p.read("reference.json") or {}
     system = (
         f"You summarize a video from its timed transcript. Write everything in {lang} "
-        f"({o['translate_style']}), except `quotes[].text` which stays in the original language.\n"
+        f"({style_for(o)}), except `quotes[].text` which stays in the original language.\n"
         "- title: a compelling title for the video. logline: one sentence.\n"
         "- summary: 2–4 short paragraphs covering what is discussed and the main arguments.\n"
         "- chapters: 5–12 chapters covering the whole video in order; `cue` is the id of the line where the "
@@ -337,7 +338,7 @@ def plan_highlight(p: Project, req: dict) -> str:
         "is only kept together with its answer. Prefer fewer, complete clips over many fragments; cutting "
         "filler and digressions out of the middle (jump cuts) is fine as long as the meaning still closes.\n"
         + ("- Group clips into 2–6 chapters, each with a short punchy title in "
-           f"{lang} ({o['translate_style']}; max ~14 characters) and a short English title. Clips inside a "
+           f"{lang} ({style_for(o)}; max ~14 characters) and a short English title. Clips inside a "
            "chapter usually stay in chronological order.\n" if use_chapters else
            "- Return exactly ONE chapter with an empty title containing all clips.\n")
         + ("- `hook`: one short, intriguing complete sentence (under ~8 seconds) played before everything else; "
@@ -469,13 +470,14 @@ def overlay_png(p: Project, kind: str, lines: list[str]) -> Path:
     lines = [(HL_ON + l.split(HL_ON, 1)[0] + HL_OFF + l.split(HL_ON, 1)[1]) if HL_ON in l and HL_OFF not in l
              else l for l in lines]
     W, H = project_size(p)
-    key = hashlib.sha1(json.dumps([kind, lines, W, H, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
+    han = han_variant(p.options)
+    key = hashlib.sha1(json.dumps([kind, lines, W, H, han, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
                        .encode()).hexdigest()[:20]
     out = p.dir / "overlays" / f"{key}.png"
     if not out.exists():
         out.parent.mkdir(exist_ok=True)
         tmp = out.with_suffix(f".{threading.get_ident()}.tmp.png")
-        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "items": [
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han, "items": [
             {"out": str(tmp), "kind": kind, "lines": lines}]}).encode(), check=True, capture_output=True)
         tmp.replace(out)
     return out
@@ -568,7 +570,7 @@ def probe_fps(path: Path) -> str:
     return r if r and r != "0/0" else "30000/1001"
 
 
-def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4):
+def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4, han: str = "TC"):
     """Run bin/text-render on several batches at once — a full hour of word-by-word subtitles is thousands
     of images."""
     from concurrent.futures import ThreadPoolExecutor
@@ -576,8 +578,8 @@ def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4):
     chunks = [items[k:k + size] for k in range(0, len(items), size)]
 
     def run(chunk):
-        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "items": chunk}).encode(),
-                       check=True, capture_output=True)
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han,
+                                                            "items": chunk}).encode(), check=True, capture_output=True)
 
     with ThreadPoolExecutor(max_workers=procs) as ex:
         list(ex.map(run, chunks))
@@ -629,7 +631,7 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
         tag_ev.append((t0 + cd, t1, ft))
         blur_spans.append((t0, t0 + cd))
     p.log(f"  繪製 {len(items) - 1} 張字幕／字卡圖")
-    draw_overlays(items, W, H)
+    draw_overlays(items, W, H, han=han_variant(p.options))
     blank = str(work / "blank.png")
     tracks = []
     for name, ev in (("subs", sub_ev), ("cards", card_ev), ("tags", tag_ev)):

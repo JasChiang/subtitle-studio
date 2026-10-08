@@ -11,15 +11,30 @@ import AppKit
 import Foundation
 
 struct Item: Decodable { let out: String; let kind: String; let lines: [String] }
-struct Spec: Decodable { let width: Int; let height: Int; let items: [Item] }
+struct Spec: Decodable { let width: Int; let height: Int; let items: [Item]; let han: String? }
+var hanVariant = "TC"  // Chinese glyph forms for Han-only lines: TC (Taiwan) / SC (mainland) / HK
 
 let outlineColor = NSColor(white: 0.05, alpha: 1)
 let pale = NSColor(red: 0.85, green: 0.9, blue: 0.94, alpha: 1)        // #d9e6f0
 let yellow = NSColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)         // #ffd60a
 let spokenColor = yellow                                                // karaoke: already-spoken words
 
-func font(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
-    let name = weight == .regular ? "PingFangTC-Regular" : "PingFangTC-Semibold"
+/// Font per line by script: kana → Hiragino (Japanese glyphs), Hangul → Apple SD Gothic Neo, otherwise PingFang
+/// in the project's Chinese variant (Latin text looks the same in all of them).
+func font(_ size: CGFloat, _ weight: NSFont.Weight, for text: String = "") -> NSFont {
+    let bold = weight != .regular
+    var kana = false, hangul = false
+    for u in text.unicodeScalars {
+        switch u.value {
+        case 0x3040...0x30FF: kana = true
+        case 0xAC00...0xD7AF, 0x1100...0x11FF, 0x3130...0x318F: hangul = true
+        default: break
+        }
+    }
+    let name: String
+    if kana { name = bold ? "HiraginoSans-W6" : "HiraginoSans-W3" }
+    else if hangul { name = bold ? "AppleSDGothicNeo-Bold" : "AppleSDGothicNeo-Regular" }
+    else { name = "PingFang\(hanVariant)-" + (bold ? "Semibold" : "Regular") }
     return NSFont(name: name, size: size) ?? NSFont.systemFont(ofSize: size, weight: weight)
 }
 
@@ -33,8 +48,8 @@ func para(_ align: NSTextAlignment, _ size: CGFloat) -> NSParagraphStyle {
 
 /// Fill-only text (no outline, no shadow).
 func fill(_ s: String, size: CGFloat, weight: NSFont.Weight, color: NSColor,
-          align: NSTextAlignment = .center) -> NSAttributedString {
-    NSAttributedString(string: s, attributes: [.font: font(size, weight), .foregroundColor: color,
+          align: NSTextAlignment = .center, script: String? = nil) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [.font: font(size, weight, for: script ?? s), .foregroundColor: color,
                                                .paragraphStyle: para(align, size)])
 }
 
@@ -86,7 +101,7 @@ func render(_ it: Item, w: Int, h: Int) throws {
             let s = NSMutableAttributedString()
             var run = "", lit = false
             func flush() {
-                if !run.isEmpty { s.append(fill(run, size: size, weight: weight, color: lit ? spokenColor : base)) }
+                if !run.isEmpty { s.append(fill(run, size: size, weight: weight, color: lit ? spokenColor : base, script: line)) }
                 run = ""
             }
             for ch in line {
@@ -124,6 +139,7 @@ func render(_ it: Item, w: Int, h: Int) throws {
 let data = FileHandle.standardInput.readDataToEndOfFile()
 do {
     let spec = try JSONDecoder().decode(Spec.self, from: data)
+    hanVariant = ["TC", "SC", "HK"].contains(spec.han ?? "") ? spec.han! : "TC"
     for it in spec.items { try render(it, w: spec.width, h: spec.height) }
     print("rendered \(spec.items.count)")
 } catch {

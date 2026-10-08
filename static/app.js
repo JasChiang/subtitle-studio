@@ -25,7 +25,7 @@ const OPT_FIELDS = [
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
-  ["target_lang", "目標語言", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
+  ["target_lang", "目標語言（例：繁體中文（台灣）、简体中文、日本語、English）", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
 ];
 
 const S = { defaults: null, locales: [], projects: [], cur: null, cues: [], dirty: false, active: -1, poll: null, stopAt: null };
@@ -317,7 +317,7 @@ function splitAt(i, t) {
   setDirty(); renderCues();
 }
 function joinWords(ws) {
-  const cjk = /[㐀-鿿぀-ヿ가-힯]/;
+  const cjk = /[\u3400-\u9fff\u3040-\u30ff]/;  // Han + kana (Korean keeps its spaces)
   const nos = "，。、！？；：「」『』（）《》〈〉～·";
   return ws.reduce((s, w) => s && !(nos.includes(s.at(-1)) || nos.includes(w.t[0]) || (cjk.test(s.at(-1)) && cjk.test(w.t[0]))) ? s + " " + w.t : s + w.t, "");
 }
@@ -419,7 +419,7 @@ function showLayer(el, url) {  // swap only once the new image is decoded → no
   im.src = url;
   preloaded.add(url);
 }
-const NOSPACE = "，。、！？；：「」『』（）《》〈〉～·", CJKRE = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
+const NOSPACE = "，。、！？；：「」『』（）《》〈〉～·", CJKRE = /[\u3400-\u9fff\u3040-\u30ff]/;  // Han + kana; Hangul is space-separated
 const needsSpace = (prev, tok) => !(NOSPACE.includes(prev.at(-1)) || NOSPACE.includes(tok[0]) || (CJKRE.test(prev.at(-1)) && CJKRE.test(tok[0])));
 function dialogSplit(c) {  // same as pipeline.dialog_split
   if (c.split) return c.split;
@@ -479,7 +479,7 @@ function composite(t, i) {
 }
 
 function joinHTML(spans, words) {
-  const cjk = /[㐀-鿿぀-ヿ가-힯]/;
+  const cjk = /[\u3400-\u9fff\u3040-\u30ff]/;  // Han + kana (Korean keeps its spaces)
   return spans.reduce((s, h, k) => {
     if (!k) return h;
     const a = words[k - 1].t.at(-1), b = words[k].t[0];

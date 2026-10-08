@@ -289,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "export":
                 kind = q.get("kind", ["bi"])[0]
                 cues = (p.read("cues.json") or {"cues": []})["cues"]
-                pipeline.apply_cjk_spacing(cues, p.options.get("cjk_spacing", True))
+                pipeline.apply_cjk_spacing(cues, p.options)
                 stem = Path(p.meta["name"]).stem
                 ext = {"vtt": "vtt", "json": "json"}.get(kind, "srt")
                 suffix = {"src": "", "tr": ".zh", "bi": ".bilingual", "bi-tr": ".bilingual", "vtt": "",
@@ -365,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if sub == "cues":
                 doc = {"cues": b["cues"], "edited": True, "saved": time.time()}
-                pipeline.apply_cjk_spacing(doc["cues"], p.options.get("cjk_spacing", True))
+                pipeline.apply_cjk_spacing(doc["cues"], p.options)
                 for i, c in enumerate(doc["cues"]):
                     c["id"] = i + 1
                 p.write("cues.json", doc)

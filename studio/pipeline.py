@@ -44,13 +44,16 @@ DEFAULT_OPTIONS = {
     "target_lang": "繁體中文（台灣）",
     "karaoke": False,              # word-by-word highlight, in the web preview AND the burned-in video
     "sub_order": "tr-first",       # bilingual line order, shared by the web preview and burned-in video
-    "translate_style": "台灣用語、口語通順自然；人名用台灣慣用譯名；保留品牌與專有名詞原文",
+    "translate_style": "",         # empty = automatic for the target language (Taiwan wording for 繁體中文)
     "workers": 4,
 }
 
 # ───────────────────────────── text units ─────────────────────────────
 
-CJK = r"぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
+# Han + kana are written without spaces → split per character. Hangul is NOT here: Korean separates words
+# with spaces, so it is tokenised like Latin (splitting it per syllable would drop the spaces between words).
+CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+HANGUL = "\uac00-\ud7af\u1100-\u11ff\u3130-\u318f"
 CJK_PUNCT = "，。、！？；：「」『』（）《》〈〉…—～·"
 _tok_re = re.compile(rf"[{CJK}]|[^\s{CJK}{re.escape(CJK_PUNCT)}]+|[{re.escape(CJK_PUNCT)}]")
 
@@ -73,7 +76,9 @@ def tokenize(text: str) -> list[str]:
 
 
 def norm(t: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKC", t).lower() if c.isalnum())
+    # keep combining marks (Devanagari / Tamil vowel signs …) — dropping them would make different words equal
+    return "".join(c for c in unicodedata.normalize("NFKC", t).lower()
+                   if c.isalnum() or unicodedata.category(c).startswith("M"))
 
 
 NOSPACE_PUNCT = "，。、！？；：「」『』（）《》〈〉～·"
@@ -91,8 +96,54 @@ def join_tokens(tokens: list[str]) -> str:
 
 
 def is_cjk_text(text: str) -> bool:
+    """Mostly Han / kana (written without spaces)."""
+    return script_of(text) == "cjk"
+
+
+def script_of(text: str) -> str:
+    """'cjk' (Han / kana), 'hangul' or 'latin' (everything space-separated) — by majority of letters."""
     letters = [c for c in text if c.isalpha()]
-    return bool(letters) and sum(is_cjk_char(c) for c in letters) / len(letters) > 0.5
+    if not letters:
+        return "latin"
+    if sum(is_cjk_char(c) for c in letters) / len(letters) > 0.5:
+        return "cjk"
+    if sum(bool(re.match(f"[{HANGUL}]", c)) for c in letters) / len(letters) > 0.5:
+        return "hangul"
+    return "latin"
+
+
+_ZH_WORDS = ("中文", "華語", "华语", "國語", "国语", "繁體", "繁体", "簡體", "简体", "粵", "粤", "chinese", "mandarin",
+             "cantonese", "zh", "yue")
+
+
+def is_chinese(lang: str) -> bool:
+    l = (lang or "").lower()
+    return any(w in l for w in _ZH_WORDS) and "japan" not in l and "日" not in l
+
+
+def han_variant(o: dict) -> str:
+    """Which Chinese glyph forms to draw Han characters with: TC (Taiwan), SC (mainland) or HK."""
+    t = f"{o.get('target_lang', '')} {o.get('locale', '')}".lower()
+    if any(w in t for w in ("簡體", "简体", "simplified", "zh-cn", "zh-hans", "大陆", "大陸")):
+        return "SC"
+    if any(w in t for w in ("香港", "zh-hk", "粵", "粤", "cantonese", "yue")):
+        return "HK"
+    return "TC"
+
+
+def style_for(o: dict) -> str:
+    """Translation style: the project's own text, or a sensible default for the target language."""
+    if (o.get("translate_style") or "").strip():
+        return o["translate_style"].strip()
+    t = o.get("target_lang", "")
+    if is_chinese(t) and han_variant(o) == "SC":
+        return "使用中國大陸通行用語，口語自然通順；保留品牌與專有名詞原文"
+    if is_chinese(t) and han_variant(o) == "HK":
+        return "香港書面語用字，口語自然；人名用香港慣用譯名；保留品牌與專有名詞原文"
+    if is_chinese(t):
+        return "台灣用語、口語通順自然；人名用台灣慣用譯名；保留品牌與專有名詞原文"
+    return ("natural, idiomatic subtitle language a native speaker of the target language would write; concise; "
+            "keep brand and product names as they are usually written in that language")
 
 
 def fmt_mmss(t: float) -> str:
@@ -585,7 +636,7 @@ def spread(units: list[dict], lo: float, hi: float):
         s += d
 
 
-_CJK_CH = rf"[{CJK}]"
+_CJK_CH = "[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"  # Han only: the spacing rule is a Chinese convention
 _LATIN_NUM = r"[A-Za-z0-9]"
 
 
@@ -598,13 +649,19 @@ def cjk_spacing(text: str) -> str:
     return re.sub(rf"({_LATIN_NUM})({_CJK_CH})", r"\1 \2", text)
 
 
-def apply_cjk_spacing(cues: list[dict], on: bool = True) -> int:
-    """Applies the rule to translations (and to CJK source lines). Returns how many cues changed."""
-    if not on:
+def apply_cjk_spacing(cues: list[dict], o: dict) -> int:
+    """Applies the Chinese CJK–Latin/digit spacing rule — to translations only when the target language is
+    Chinese, to the original only when the spoken language is Chinese (Japanese keeps its own convention).
+    Returns how many cues changed."""
+    if not o.get("cjk_spacing", True):
+        return 0
+    keys = (("tr",) if is_chinese(o.get("target_lang", "")) else ()) + \
+        (("text",) if str(o.get("locale", "")).lower().startswith(("zh", "yue")) else ())
+    if not keys:
         return 0
     n = 0
     for c in cues:
-        for k in ("tr",) + (("text",) if is_cjk_text(c.get("text", "")) else ()):
+        for k in keys:
             v = c.get(k)
             if v and cjk_spacing(v) != v:
                 c[k] = cjk_spacing(v)
@@ -655,8 +712,8 @@ CONJ = {"and", "but", "so", "because", "which", "that", "or", "when", "if", "whe
 
 
 def cue_limits(words: list[dict], o: dict) -> tuple[bool, int]:
-    cjk = is_cjk_text(join_tokens([w["t"] for w in words[:400]]))
-    return cjk, o["max_chars"] or (22 if cjk else 70)
+    script = script_of(join_tokens([w["t"] for w in words[:400]]))
+    return script == "cjk", o["max_chars"] or {"cjk": 22, "hangul": 30}.get(script, 70)
 
 
 def build_cues(words: list[dict], o: dict) -> list[dict]:
@@ -1047,7 +1104,7 @@ def stage_translate(p: Project, only_missing: bool = False):
     ref = p.read("reference.json") or {}
     glossary = o["glossary"].strip()
     system = (
-        f"You translate subtitles into {o['target_lang']}. Style: {o['translate_style']}.\n"
+        f"You translate subtitles into {o['target_lang']}. Style: {style_for(o)}.\n"
         "Cues come grouped by SENTENCE. For each sentence: first understand / translate the whole sentence, then "
         "split your translation across that sentence's cues so each cue's translation says what is spoken IN "
         "THAT CUE. If the target language needs a different word order, restructure the translation so every "
@@ -1129,7 +1186,7 @@ def stage_translate(p: Project, only_missing: bool = False):
     done = [0]
     with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
         list(ex.map(one, batches))
-    fixed = apply_cjk_spacing(cues, o.get("cjk_spacing", True))
+    fixed = apply_cjk_spacing(cues, o)
     if fixed:
         p.write("cues.json", doc)
         p.log(f"  中英數之間補半形空格：{fixed} 條")
