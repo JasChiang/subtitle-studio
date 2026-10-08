@@ -132,12 +132,14 @@ def delete_file(name: str):
 
 def generate(model: str, parts: list[dict], *, system: str | None = None, schema: dict | None = None,
              max_tokens: int = 32768, low_res: bool = False, usage: Usage | None = None,
-             log=print, temperature: float | None = None) -> tuple[str, str]:
+             log=print, temperature: float | None = None, thinking: str | None = None) -> tuple[str, str]:
     """Returns (text, model_that_served). Retries transient errors across the fallback chain."""
     k = api_key()
     gen: dict = {"maxOutputTokens": max_tokens}
     if temperature is not None:
         gen["temperature"] = temperature
+    if thinking:  # "minimal" | "low" | "medium" | "high" — cheap mechanical tasks don't need deep thinking
+        gen["thinkingConfig"] = {"thinkingLevel": thinking}
     if low_res:
         gen["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
     if schema:

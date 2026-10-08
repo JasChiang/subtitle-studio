@@ -7,6 +7,7 @@ opinion), and timing always comes from Apple's per-word clock — Gemini only ch
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -30,6 +31,7 @@ DEFAULT_OPTIONS = {
     "text_model": "gemini-flash-latest",
     "chunk_minutes": 10,
     "drop_fillers": True,          # um / uh / 嗯 / 呃
+    "semantic_breaks": True,       # Gemini picks meaning-unit breaks; rules remain the fallback
     "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
     "max_duration": 6.5,
     "gap_break": 0.7,
@@ -530,10 +532,19 @@ CLAUSE_END = tuple(",;:，；：、—")
 CONJ = {"and", "but", "so", "because", "which", "that", "or", "when", "if", "where", "who", "then", "like"}
 
 
+def cue_limits(words: list[dict], o: dict) -> tuple[bool, int]:
+    cjk = is_cjk_text(join_tokens([w["t"] for w in words[:400]]))
+    return cjk, o["max_chars"] or (22 if cjk else 70)
+
+
 def build_cues(words: list[dict], o: dict) -> list[dict]:
-    text_all = join_tokens([w["t"] for w in words[:400]])
-    cjk = is_cjk_text(text_all)
-    max_chars = o["max_chars"] or (22 if cjk else 70)
+    return finalize_cues(heuristic_groups(words, o))
+
+
+def heuristic_groups(words: list[dict], o: dict) -> list[list[dict]]:
+    """Rule-based grouping: punctuation, pauses, speaker changes, length — used as fallback and to split
+    over-long semantic groups."""
+    cjk, max_chars = cue_limits(words, o)
     max_dur, gap_break = o["max_duration"], o["gap_break"]
 
     def clen(ws):
@@ -569,6 +580,10 @@ def build_cues(words: list[dict], o: dict) -> list[dict]:
         cur.append(w)
     if cur:
         cues.append(cur)
+    return cues
+
+
+def finalize_cues(cues: list[list[dict]]) -> list[dict]:
     # a cue whose successor starts almost at once (an overlapping "Yeah." from the other speaker) can't be
     # shown on its own — fold it into the next cue
     merged: list[list[dict]] = []
@@ -594,6 +609,114 @@ def build_cues(words: list[dict], o: dict) -> list[dict]:
     return out
 
 
+SEG_SCHEMA = {"type": "object", "properties": {"breaks": {"type": "array", "items": {"type": "integer"}}},
+              "required": ["breaks"]}
+
+
+def hard_break(prev: dict, w: dict, o: dict) -> bool:
+    return bool(w.get("spk")) or w["s"] - prev["e"] > o["gap_break"]
+
+
+def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
+    """LLM picks subtitle breaks so each line is a meaning unit; hard breaks (speaker change, long pause) are
+    fixed beforehand so parallel windows never cut a sentence. Results are re-checked locally."""
+    cjk, max_chars = cue_limits(words, o)
+    ideal = max(8, int(max_chars * (0.6 if cjk else 0.65)))
+    # blocks between hard breaks, packed into windows of ≤ ~350 words
+    blocks, cur = [], []
+    for i, w in enumerate(words):
+        if cur and hard_break(words[i - 1], w, o):
+            blocks.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        blocks.append(cur)
+    windows, win = [], []
+    for b in blocks:
+        if win and len(win) + len(b) > 350:
+            windows.append(win)
+            win = []
+        win += b
+    if win:
+        windows.append(win)
+    hard = {i for b in blocks for i in [b[0]]}  # index that STARTS a block
+
+    system = (
+        "You segment a transcript into on-screen subtitle lines. Words are given as [index]word. Return "
+        "`breaks`: the indices of words AFTER which a new subtitle starts.\n"
+        "- Every subtitle must be a natural meaning unit a viewer reads at a glance: a short full sentence, "
+        "or a clause / phrase of a longer sentence.\n"
+        "- NEVER end a subtitle on a word that needs the next one: articles, prepositions, possessives, "
+        "auxiliaries, conjunctions, relative pronouns, subjects without their verb (the, a, of, to, in, my, "
+        "his, is, was, and, but, because, that, which, I, you…; in Chinese 的/了/在/把/和/因為…). Put such "
+        "words at the START of the next subtitle instead.\n"
+        "- Prefer breaks at sentence ends, then clause boundaries (after commas, before and/but/because/"
+        "which/so), then between phrases. Don't split a name, number+unit, or fixed expression.\n"
+        f"- Length: at most {max_chars} characters per subtitle, ideally around {ideal}. A very short "
+        "sentence can share a line with the next one if both fit.\n"
+        "- ‖ marks a forced break (speaker change or long pause) — always break there.\n"
+        "Return breaks in ascending order."
+    )
+    done, result = [0], {}
+
+    def one(k):
+        idxs = windows[k]
+        text = " ".join(("‖ " if i in hard and i != idxs[0] else "") + f"[{i}]{words[i]['t']}" for i in idxs)
+        brks: set[int] = set()
+        try:
+            data, _ = gemini.generate_json(o["text_model"], [{"text": text}], system=system, schema=SEG_SCHEMA,
+                                           usage=p.usage, log=p.log, max_tokens=16384, thinking="low")
+            brks = {int(b) for b in data.get("breaks", []) if idxs[0] <= int(b) < idxs[-1]}
+        except Exception as e:
+            p.log(f"  語意斷句區塊 {k + 1} 失敗，改用規則斷句：{e}")
+            result[k] = heuristic_groups([words[i] for i in idxs], o)
+            return
+        groups, cur = [], []
+        for i in idxs:
+            if cur and (i in hard or i - 1 in brks):
+                groups.append(cur)
+                cur = []
+            cur.append(words[i])
+        if cur:
+            groups.append(cur)
+        out = []
+        for g in groups:  # enforce limits: over-long → rule-based split inside
+            too_long = len(join_tokens([w["t"] for w in g])) > max_chars * 1.1 or \
+                g[-1]["e"] - g[0]["s"] > o["max_duration"] + 1.0
+            out += heuristic_groups(g, o) if too_long else [g]
+        result[k] = out
+        done[0] += 1
+        p.status(progress=done[0] / len(windows))
+
+    with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
+        list(ex.map(one, range(len(windows))))
+    p.log(f"  語意斷句：{len(windows)} 個區塊")
+    return [g for k in range(len(windows)) for g in result[k]]
+
+
+DANGLING = {"the", "a", "an", "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "about", "my",
+            "your", "his", "her", "its", "our", "their", "this", "these", "those", "and", "but", "or", "nor",
+            "because", "that", "which", "who", "whose", "if", "as", "than", "is", "are", "was", "were", "be",
+            "been", "am", "do", "does", "did", "have", "has", "had", "will", "would", "can", "could", "should",
+            "i", "we", "they", "he", "she", "i'm", "it's", "you're", "we're", "they're", "very", "so",
+            "的", "在", "把", "和", "跟", "與", "被", "對", "從"}
+
+
+def fix_dangling(groups: list[list[dict]], o: dict, max_chars: int) -> list[list[dict]]:
+    """Deterministic cleanup: a line ending (without punctuation) on a word that needs the next one — the,
+    of, my, because… — hands that word to the next line, unless a hard break sits between them."""
+    for i in range(len(groups) - 1):
+        g, nxt = groups[i], groups[i + 1]
+        for _ in range(3):
+            last = g[-1]["t"]
+            if len(g) < 2 or not nxt or re.search(r"[.?!,;:—…\"」。，？！]$", last) \
+                    or norm(last) not in {norm(d) for d in DANGLING} or hard_break(g[-1], nxt[0], o) \
+                    or len(join_tokens([w["t"] for w in [g[-1]] + nxt])) > max_chars * 1.1:
+                break
+            nxt.insert(0, g.pop())
+    return [g for g in groups if g]
+
+
 def stage_cues(p: Project):
     o = p.options
     asr = p.read("asr.json")
@@ -606,7 +729,11 @@ def stage_cues(p: Project):
     segs = asr["segments"]
     for k in range(0, len(segs), win):
         words += align_window(segs[k:k + win], corr[k:k + win], seg_offset=k)
-    cues = build_cues(words, o)
+    if o.get("semantic_breaks", True) and words and os.environ.get("GEMINI_API_KEY"):
+        groups = semantic_groups(p, words, o)
+    else:
+        groups = heuristic_groups(words, o)
+    cues = finalize_cues(fix_dangling(groups, o, cue_limits(words, o)[1]))
     # keep the raw ASR text per cue for the "what changed" view
     asr_words = [(u["s"], u["t"]) for seg in asr["segments"] for u in asr_units(seg)]
     for c in cues:
@@ -661,7 +788,7 @@ def stage_translate(p: Project, only_missing: bool = False):
                   "Context after (do not translate): " + " / ".join(c["text"] for c in ctx_after) + "\n\n"
                   "CUES:\n" + "\n".join(f"{cues[i]['id']}\t{cues[i]['text']}" for i in batch))
         data, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system, schema=TR_SCHEMA,
-                                       usage=p.usage, log=p.log, max_tokens=32768)
+                                       usage=p.usage, log=p.log, max_tokens=32768, thinking="low")
         got = {it["id"]: it["tr"].strip() for it in data.get("items", [])}
         with lock:
             for i in batch:

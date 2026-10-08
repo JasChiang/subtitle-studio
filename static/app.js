@@ -13,13 +13,13 @@ const STAGE_INFO = {
   asr: ["Apple ASR", "裝置端轉錄，取得每個字的時間碼"],
   reference: ["Gemini 參考稿", "分段上傳低解析影片，獨立聽寫＋認講者／專有名詞"],
   correct: ["校正", "用參考稿修正 ASR 文字（不動時間碼）"],
-  cues: ["斷句", "對齊回字級時間碼，切成字幕條"],
+  cues: ["斷句", "對齊回字級時間碼，依語意切成字幕條"],
   translate: ["翻譯", "逐條翻譯"],
 };
 const OPT_FIELDS = [
-  ["locale", "ASR 語言", "locale"], ["context", "影片脈絡", "textarea"], ["glossary", "詞彙表", "textarea"],
+  ["locale", "ASR 語言", "locale"], ["context", "影片脈絡（選填）", "textarea"], ["glossary", "詞彙表（選填）", "textarea"],
   ["ref_model", "參考稿模型（看影片）", "text"], ["text_model", "校正／翻譯模型", "text"],
-  ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"],
+  ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["translate", "要翻譯", "bool"],
   ["target_lang", "目標語言", "text"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
