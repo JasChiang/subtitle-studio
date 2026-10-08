@@ -198,7 +198,7 @@ function renderOpts() {
     if (type === "bool") return `<label class="row gap"><input type="checkbox" name="${k}" ${v ? "checked" : ""}> ${label}</label>`;
     if (type === "textarea") return `<label><span>${label}</span><textarea name="${k}" rows="2">${esc(v)}</textarea></label>`;
     if (type.startsWith("select:")) return `<label><span>${label}</span><select name="${k}">${type.slice(7).split("|").map((o) => { const [val, txt] = o.split("="); return `<option value="${val}" ${val === v ? "selected" : ""}>${txt}</option>`; }).join("")}</select></label>`;
-    if (type === "locale") return `<label><span>${label}</span><select name="${k}">${S.locales.map((l) => `<option ${l === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
+    if (type === "locale") return `<label><span>${label}</span><select name="${k}"><option value="auto" ${v === "auto" ? "selected" : ""}>自動判斷（下次重跑辨識時）</option>${S.locales.map((l) => `<option ${l === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
     return `<label><span>${label}</span><input name="${k}" type="${type}" step="any" value="${esc(v)}" class="${type === "text" ? "mono" : ""}"></label>`;
   }).join("");
 }
@@ -218,7 +218,10 @@ async function loadRef() {
   const r = await api(`/api/projects/${encodeURIComponent(S.cur.id)}/reference`).catch(() => ({}));
   if (!r.lines) { $("#refView").innerHTML = `<p class="muted">還沒有參考稿。</p>`; return; }
   const sp = Object.entries(r.speakers || {}).map(([k, v]) => `<b>${esc(k)}</b>：${esc(v)}`).join("<br>");
-  $("#refView").innerHTML = `<p class="small">${sp}</p><p class="small muted">專有名詞：${esc((r.terms || []).join("、"))}</p><hr>` +
+  const lg = r.languages?.languages?.length ? `<p class="small">說話語言：${r.languages.languages.map((l) =>
+    `${esc(l.name || l.code)}（${esc(l.code)}）約 ${Math.round((l.share || 0) * 100)}%`).join("、")}${
+    { words: "，句子裡夾雜外語", segments: "，整句／整段換語言" }[r.languages.mixing] || ""}</p>` : "";
+  $("#refView").innerHTML = lg + `<p class="small">${sp}</p><p class="small muted">專有名詞：${esc((r.terms || []).join("、"))}</p><hr>` +
     r.lines.map((l) => `<p><span class="t" data-t="${l.t}">${fmt(l.t).slice(0, -4)}</span><span class="sp">${esc(l.speaker)}</span>${esc(l.text)}</p>`).join("");
 }
 $("#refView").addEventListener("click", (e) => { if (e.target.dataset.t) seek(+e.target.dataset.t); });
@@ -238,7 +241,7 @@ function rowHTML(c, i) {
     <td class="tc"><input value="${fmt(c.start)}" data-f="start"></td>
     <td class="tc"><input value="${fmt(c.end)}" data-f="end"></td>
     <td class="txt"><div contenteditable="plaintext-only" data-f="text">${esc(c.text)}</div>${changed ? `<div class="asr">ASR：${esc(c.asr)}</div>` : ""}</td>
-    <td class="tr"><div contenteditable="plaintext-only" data-f="tr">${esc(c.tr || "")}</div></td>
+    <td class="tr"><div contenteditable="plaintext-only" data-f="tr" class="${c.same ? "same" : ""}">${esc(c.tr || "")}</div></td>
     <td class="act"><button data-a="play" title="播放這條">▶</button><button data-a="split" title="在播放點切開（⌥S）">✂</button><button data-a="merge" title="與下一條合併">⤓</button><button data-a="del" title="刪除">✕</button></td></tr>`;
 }
 function renderCues() {
@@ -505,7 +508,8 @@ window.addEventListener("beforeunload", (e) => { if (S.dirty) { e.preventDefault
 const dlg = $("#newDlg");
 $("#newBtn").onclick = () => {
   const o = S.defaults.options;
-  $("#newLocale").innerHTML = S.locales.map((l) => `<option ${l === o.locale ? "selected" : ""}>${l}</option>`).join("");
+  $("#newLocale").innerHTML = `<option value="auto" selected>自動判斷（Gemini 先聽一小段）</option>` +
+    S.locales.map((l) => `<option value="${l}">${l}</option>`).join("");
   $("#newRefModel").value = o.ref_model;
   $("#newErr").textContent = "";
   $("#browser").hidden = true;

@@ -289,3 +289,4 @@ dialog::backdrop { background: rgba(10,10,12,.6); }
 #vxKaraokeRow.off { opacity: .45; }
 .vx-list { display: grid; gap: 6px; }
 .vx-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+td.tr .same:empty::before { content: "（本來就是目標語言，不需翻譯）"; color: var(--faint); }

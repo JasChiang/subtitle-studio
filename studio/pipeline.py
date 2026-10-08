@@ -24,7 +24,7 @@ ASR_BIN = ROOT / "bin" / "apple-asr"
 STAGES = ["asr", "reference", "correct", "cues", "translate"]
 
 DEFAULT_OPTIONS = {
-    "locale": "en-US",
+    "locale": "auto",              # auto = Gemini listens to a few excerpts and picks the Apple ASR language
     "context": "",                 # free text: who/what is in the video
     "glossary": "",                # comma/newline separated names & terms
     "ref_model": "gemini-flash-latest",
@@ -36,6 +36,7 @@ DEFAULT_OPTIONS = {
     "backchannels": "omit",        # omit | keep — listener's mm-hmm / yeah that carry no information
     "energy_snap": True,           # refine word boundaries with the audio loudness (pauses, onsets)
     "correct_with_audio": True,    # correction also listens to the audio of each chunk
+    "reasr_segments": True,        # whole sentences in another language → re-run Apple ASR in that language
     "cjk_spacing": True,           # half-width space between CJK and Latin letters / digits in Chinese text
     "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
     "max_duration": 6.5,
@@ -242,6 +243,156 @@ def run_stages(p: Project, stages: list[str]):
         raise
 
 
+# ───────────────────────────── 0. languages ─────────────────────────────
+
+BASE_LOCALE = {"en": "en-US", "zh": "zh-TW", "cmn": "zh-TW", "yue": "yue-CN", "ja": "ja-JP", "ko": "ko-KR",
+               "es": "es-ES", "fr": "fr-FR", "de": "de-DE", "it": "it-IT", "pt": "pt-BR", "hi": "hi-IN"}
+_SUPPORTED: list[str] = []
+
+
+def supported_locales() -> list[str]:
+    global _SUPPORTED
+    if not _SUPPORTED and ASR_BIN.exists():
+        _SUPPORTED = subprocess.run([str(ASR_BIN), "--list-locales"], capture_output=True, text=True,
+                                    timeout=60).stdout.split()
+    return _SUPPORTED
+
+
+def lang_base(code: str) -> str:
+    c = (code or "").replace("_", "-").lower()
+    if c.startswith(("yue", "zh-hk", "zh-yue")):
+        return "yue" if c.startswith("yue") else "zh"
+    return c.split("-")[0]
+
+
+def to_locale(code: str, supported: list[str], prefer_region: str = "") -> str | None:
+    """A language code from Gemini (en, zh-TW, zh-Hant, cmn, ja-JP, …) → a locale Apple ASR supports."""
+    if not code:
+        return None
+    c = code.replace("_", "-")
+    low = c.lower()
+    alias = {"zh-hant": "zh-TW", "zh-hans": "zh-CN", "cmn-tw": "zh-TW", "cmn-cn": "zh-CN", "cmn": "zh-TW",
+             "zh-yue": "yue-CN", "yue-hk": "zh-HK"}
+    c = alias.get(low, c)
+    by_lower = {x.lower(): x for x in supported}
+    if c.lower() in by_lower:
+        return by_lower[c.lower()]
+    base = lang_base(c)
+    for cand in ([f"{base}-{prefer_region}"] if prefer_region else []) + [BASE_LOCALE.get(base, "")]:
+        if cand and cand.lower() in by_lower:
+            return by_lower[cand.lower()]
+    same = [x for x in supported if lang_base(x) == base]
+    return same[0] if same else None
+
+
+LANG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "primary": {"type": "string", "description": "BCP-47 code of the main spoken language, e.g. zh-TW, en-US"},
+        "languages": {"type": "array", "items": {"type": "object", "properties": {
+            "code": {"type": "string"}, "name": {"type": "string"},
+            "share": {"type": "number", "description": "rough share of the speech, 0–1"}},
+            "required": ["code", "name", "share"]}},
+        "mixing": {"type": "string", "enum": ["none", "words", "segments"],
+                   "description": "none = one language; words = other-language words inside sentences; "
+                                  "segments = whole sentences / turns switch language"},
+    },
+    "required": ["primary", "languages", "mixing"],
+}
+
+
+def detect_languages(p: Project) -> dict:
+    """Gemini listens to a few short excerpts and reports the spoken languages (cheap: audio only)."""
+    dur = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                                         "csv=p=0", str(p.media)]))
+    picks = [(0.0, dur)] if dur <= 150 else [(dur * f, 40.0) for f in (0.08, 0.45, 0.8)]
+    clip = p.dir / "lang_sample.m4a"
+    args, fc = [], ""
+    for i, (a, d) in enumerate(picks):
+        args += ["-ss", f"{a:.2f}", "-t", f"{min(d, dur - a):.2f}", "-i", str(p.media)]
+        fc += f"[{i}:a]"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", f"{fc}concat=n={len(picks)}:v=0:a=1[a]",
+                    "-map", "[a]", "-ac", "1", "-c:a", "aac", "-b:a", "48k", str(clip)], check=True)
+    f = gemini.upload_file(clip, "audio/mp4", log=p.log)
+    try:
+        data, _ = gemini.generate_json(
+            p.options["text_model"], [{"file_data": {"mime_type": "audio/mp4", "file_uri": f["uri"]}}, {"text": (
+                "These are short excerpts of one video. Which languages are spoken, and roughly what share each? "
+                "For Chinese say which variety (Taiwan Mandarin zh-TW, mainland Mandarin zh-CN, Cantonese yue). "
+                "Say whether languages are mixed inside sentences (words) or switch by whole sentences / "
+                "speakers (segments).")}],
+            schema=LANG_SCHEMA, usage=p.usage, log=p.log, max_tokens=4096, thinking="low")
+    finally:
+        gemini.delete_file(f["name"])
+        clip.unlink(missing_ok=True)
+    p.write("languages.json", data)
+    return data
+
+
+def languages_note(p: Project) -> str:
+    """'Spoken: Chinese (zh-TW) ~80%, English ~20%; mixed inside sentences' — for correction / translation prompts."""
+    d = p.read("languages.json") or {}
+    langs = [f"{l.get('name') or l.get('code')} ({l.get('code')}) ~{round(100 * float(l.get('share') or 0))}%"
+             for l in d.get("languages", [])]
+    if not langs:
+        return ""
+    mix = {"words": "other-language words inside sentences (code-switching)",
+           "segments": "whole sentences / speakers switch language"}.get(d.get("mixing", ""), "")
+    return "Spoken languages: " + ", ".join(langs) + (f"; {mix}" if mix else "")
+
+
+def other_language_spans(ref_lines: list[dict], primary: str, words: list[dict],
+                         min_len: float = 2.5) -> list[dict]:
+    """Stretches where the reference transcript says a whole line is in another language. Consecutive lines
+    in the same language are merged; edges snap to the widest pause between ASR words near them."""
+    pb = lang_base(primary)
+    lines = sorted((l for l in ref_lines if l.get("text", "").strip()), key=lambda l: l["t"])
+    spans = []
+    for i, l in enumerate(lines):
+        lb = lang_base(l.get("lang", "")) or pb
+        if lb == pb:
+            continue
+        end = lines[i + 1]["t"] if i + 1 < len(lines) else l["t"] + max(2.0, 0.35 * len(l["text"].split()))
+        if spans and spans[-1]["lang"] == l["lang"] and l["t"] - spans[-1]["end"] <= 1.5:
+            spans[-1]["end"] = end
+        else:
+            spans.append({"lang": l["lang"], "start": l["t"], "end": end})
+
+    def snap(t):
+        gaps = [((a["e"] + b["s"]) / 2, b["s"] - a["e"]) for a, b in zip(words, words[1:])
+                if abs((a["e"] + b["s"]) / 2 - t) <= 1.2]
+        return max(gaps, key=lambda g: g[1])[0] if gaps else t
+
+    out = []
+    for sp in spans:
+        a, b = snap(sp["start"]), snap(sp["end"])
+        if b - a >= min_len:
+            out.append({"lang": sp["lang"], "start": round(a, 3), "end": round(b, 3)})
+    return out
+
+
+def merge_reasr(asr: dict, spans: list[dict], redone: list[list[dict]]) -> dict:
+    """Replace the primary-language ASR inside each span with that span's re-recognised segments."""
+    def inside(w):
+        m = (w["start"] + w["end"]) / 2
+        return any(sp["start"] <= m < sp["end"] for sp in spans)
+
+    segs = []
+    for seg in asr["segments"]:
+        keep = [w for w in seg["words"] if not inside(w)]
+        if not keep:
+            continue
+        if len(keep) == len(seg["words"]):
+            segs.append(seg)
+        else:
+            segs.append({**seg, "text": join_tokens([w["text"] for w in keep]), "start": keep[0]["start"],
+                         "end": keep[-1]["end"], "words": keep})
+    for sp, new in zip(spans, redone):
+        segs += [{**s, "lang": sp["lang"]} for s in new]
+    segs.sort(key=lambda s: s["start"])
+    return {**asr, "segments": segs, "reasr": spans}
+
+
 # ───────────────────────────── 1. Apple ASR ─────────────────────────────
 
 def stage_asr(p: Project):
@@ -253,6 +404,18 @@ def stage_asr(p: Project):
                         str(wav)], check=True)
     if not ASR_BIN.exists():
         raise RuntimeError("bin/apple-asr 不存在，先跑 ./setup.sh")
+    if not p.read("languages.json") and os.environ.get("GEMINI_API_KEY"):
+        try:
+            d = detect_languages(p)
+            p.log(f"  語言判斷：{languages_note(p) or d}")
+        except Exception as e:
+            p.log(f"  語言判斷失敗：{e}")
+    if o["locale"] == "auto":
+        primary = (p.read("languages.json") or {}).get("primary", "")
+        loc = to_locale(primary, supported_locales()) or "en-US"
+        p.update(options={**p.meta.get("options", {}), "locale": loc})
+        o = p.options
+        p.log(f"  自動選擇辨識語言：{loc}" + ("" if primary else "（無法判斷，預設英文）"))
     proc = subprocess.Popen([str(ASR_BIN), str(wav), "--locale", o["locale"]], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     duration = None
@@ -306,7 +469,8 @@ REF_SCHEMA = {
         "lines": {"type": "array", "items": {"type": "object", "properties": {
             "t": {"type": "string", "description": "start time MM:SS relative to clip start"},
             "speaker": {"type": "string"},
-            "text": {"type": "string"}}, "required": ["t", "speaker", "text"]}},
+            "lang": {"type": "string", "description": "language code of this line, e.g. en, zh-TW, ja"},
+            "text": {"type": "string"}}, "required": ["t", "speaker", "lang", "text"]}},
     },
     "required": ["speakers", "terms", "lines"],
 }
@@ -368,7 +532,9 @@ def stage_reference(p: Project):
                 "label; use the person's real name when the video makes it clear (introductions, on-screen "
                 "text, context), otherwise Host / Guest / Speaker 1… List every speaker in `speakers` with a "
                 "short description, and every proper noun, brand, title or technical term heard in `terms`, "
-                "spelled correctly. Use visual cues (lip movement, on-screen text) to resolve unclear words."
+                "spelled correctly. Use visual cues (lip movement, on-screen text) to resolve unclear words. "
+                "`lang` = the language code of that line (en, zh-TW, ja, …); write every line in the language "
+                "it is actually spoken in."
             )
             data, served = gemini.generate_json(
                 o["ref_model"], [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": prompt}],
@@ -381,7 +547,8 @@ def stage_reference(p: Project):
             t = parse_mmss(ln.get("t", ""))
             if t is None or not ln.get("text", "").strip():
                 continue
-            lines.append({"t": round(a0 + t, 2), "speaker": ln.get("speaker", ""), "text": ln["text"].strip()})
+            lines.append({"t": round(a0 + t, 2), "speaker": ln.get("speaker", ""), "lang": ln.get("lang", ""),
+                          "text": ln["text"].strip()})
         p.write(f"reference/chunk_{i:03d}.json", {"span": [a, b], "padded": [a0, b0], "model": served,
                                                   "speakers": data.get("speakers", []),
                                                   "terms": data.get("terms", []), "lines": lines})
@@ -419,8 +586,48 @@ CORR_SCHEMA = {
 }
 
 
+def reasr_segments(p: Project) -> int:
+    """Whole sentences in another language → Apple ASR again in THAT language, so those words get real
+    word timings instead of being guessed by the corrector. Returns how many stretches were redone."""
+    o = p.options
+    ref = p.read("reference.json") or {}
+    asr0 = p.read("asr_primary.json") or p.read("asr.json")
+    if not ref.get("lines") or not asr0:
+        return 0
+    words = [{"s": w["start"], "e": w["end"]} for seg in asr0["segments"] for w in seg["words"]]
+    spans = other_language_spans(ref["lines"], o["locale"], words)
+    sup = supported_locales()
+    spans = [sp for sp in spans if to_locale(sp["lang"], sup)]
+    if not spans:
+        return 0
+    redone = []
+    for sp in spans:
+        loc = to_locale(sp["lang"], sup)
+        part = p.dir / f"reasr_{sp['start']:.0f}.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{sp['start']:.3f}", "-t", f"{sp['end'] - sp['start']:.3f}",
+                        "-i", str(p.dir / "audio.wav"), str(part)], check=True)
+        out = subprocess.run([str(ASR_BIN), str(part), "--locale", loc], capture_output=True, text=True)
+        part.unlink(missing_ok=True)
+        segs = json.loads(out.stdout)["segments"] if out.returncode == 0 and out.stdout.strip() else []
+        for seg in segs:  # back onto the full video's clock
+            seg["start"] += sp["start"]
+            seg["end"] += sp["start"]
+            for w in seg["words"]:
+                w["start"] = (w["start"] or 0) + sp["start"]
+                w["end"] = (w["end"] or w["start"] - sp["start"]) + sp["start"]
+        redone.append(segs)
+        p.log(f"  {fmt_mmss(sp['start'])}–{fmt_mmss(sp['end'])} 是 {sp['lang']}，改用 {loc} 重新辨識："
+              f"{' '.join(s['text'] for s in segs)[:60]}")
+    if not p.read("asr_primary.json"):
+        p.write("asr_primary.json", asr0)
+    p.write("asr.json", merge_reasr(asr0, spans, redone))
+    return len(spans)
+
+
 def stage_correct(p: Project):
     o = p.options
+    if o.get("reasr_segments", True) and reasr_segments(p):
+        (p.dir / "corrected.json").unlink(missing_ok=True)  # the segments changed → correct afresh
     asr = p.read("asr.json")
     ref = p.read("reference.json") or {"spans": [], "lines": [], "terms": [], "speakers": {}}
     segs = asr["segments"]
@@ -456,6 +663,12 @@ def stage_correct(p: Project):
         "- If the speaker changes INSIDE one segment (see REFERENCE speaker labels), insert ' || ' at the "
         "exact point of the change.\n"
         "- Return exactly one entry per supplied id, same order."
+        + (f"\n{languages_note(p)}. When speech mixes languages, keep every word in the language it was SPOKEN "
+           "in — English stays English, Chinese stays Chinese; never turn a spoken foreign word into "
+           "same-sounding characters or the reverse. The ASR listened in ONE language, so foreign words often "
+           "come out as garbled nonsense: repair them to the intended word (often a product name or technical "
+           "term) when the audio and REFERENCE make it clear, but never invent words. Segments marked "
+           "lang=… were recognised in that language." if languages_note(p) else "")
         + (f"\nKnown names/terms (use these spellings): {', '.join(terms)}" if terms else "")
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
@@ -483,8 +696,8 @@ def stage_correct(p: Project):
         b = segs[idxs[-1]]["end"] + 10
         ref_lines = [f"[{fmt_mmss(ln['t'])}] {ln['speaker']}: {ln['text']}" for ln in ref["lines"]
                      if a <= ln["t"] <= b]
-        asr_lines = [f"[s{i} {fmt_mmss(segs[i]['start'])}–{fmt_mmss(segs[i]['end'])}] {segs[i]['text']}"
-                     for i in idxs]
+        asr_lines = [f"[s{i} {fmt_mmss(segs[i]['start'])}–{fmt_mmss(segs[i]['end'])}"
+                     f"{' lang=' + segs[i]['lang'] if segs[i].get('lang') else ''}] {segs[i]['text']}" for i in idxs]
         prompt = ("REFERENCE:\n" + ("\n".join(ref_lines) or "(none)") + "\n\nASR SEGMENTS:\n"
                   + "\n".join(asr_lines))
         parts, upl = [{"text": prompt}], None
@@ -1067,7 +1280,8 @@ TR_SCHEMA = {
     "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
         "id": {"type": "integer"},
         "echo": {"type": "string", "description": "the first 3 words (or first 4 characters) of THIS cue's source"},
-        "tr": {"type": "string"}}, "required": ["id", "echo", "tr"]}}},
+        "same": {"type": "boolean", "description": "true if this cue is ALREADY in the target language"},
+        "tr": {"type": "string"}}, "required": ["id", "echo", "same", "tr"]}}},
     "required": ["items"],
 }
 TR_END = (".", "?", "!", "。", "？", "！", "…", '."', '?"', '!"', "」")
@@ -1113,12 +1327,15 @@ def stage_translate(p: Project, only_missing: bool = False):
         "is a question or exclamation. A cue whose text has two lines starting with '- ' is two people speaking "
         "at once: translate it as '－第一人的話　－第二人的話' on ONE line. For every cue also return `echo` = the "
         "first 3 words (or first 4 characters) of that cue's own source text, copied exactly — it is used to "
-        "check that each translation is attached to the right cue. Return every id."
+        "check that each translation is attached to the right cue. If a cue is ALREADY entirely in the target "
+        "language, set `same` = true and `tr` = '' (it is shown as a single line); a cue mixing languages is "
+        "still translated. Return every id."
+        + (f"\n{languages_note(p)}." if languages_note(p) else "")
         + (f"\nGlossary / names: {glossary}" if glossary else "")
         + (f"\nSpeakers: {json.dumps(ref.get('speakers', {}), ensure_ascii=False)}" if ref.get("speakers") else "")
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
-    todo = [i for i, c in enumerate(cues) if not (only_missing and c.get("tr"))]
+    todo = [i for i, c in enumerate(cues) if not (only_missing and (c.get("tr") or c.get("same")))]
     import threading
     lock = threading.Lock()
     stats = {"retried": 0, "rejected": 0}
@@ -1153,10 +1370,11 @@ def stage_translate(p: Project, only_missing: bool = False):
             bad = 0
             for it in data.get("items", []):
                 i = by_id.get(it.get("id"))
-                if i is None or not it.get("tr", "").strip():
+                same = bool(it.get("same"))
+                if i is None or (not it.get("tr", "").strip() and not same):
                     continue
                 if echo_ok(it.get("echo", ""), cues[i]["text"]):
-                    good.setdefault(i, it["tr"].strip())
+                    good.setdefault(i, None if same else it["tr"].strip())
                 else:
                     bad += 1
             if bad == 0 and len(good) == len(batch):
@@ -1175,7 +1393,8 @@ def stage_translate(p: Project, only_missing: bool = False):
         with lock:
             for i in batch:
                 if i in good:
-                    cues[i]["tr"] = good[i]
+                    cues[i]["tr"] = good[i] or ""
+                    cues[i]["same"] = good[i] is None  # already in the target language → shown as one line
                 else:
                     stats["rejected"] += 1
             p.write("cues.json", doc)
@@ -1190,8 +1409,10 @@ def stage_translate(p: Project, only_missing: bool = False):
     if fixed:
         p.write("cues.json", doc)
         p.log(f"  中英數之間補半形空格：{fixed} 條")
-    missing = sum(1 for c in cues if not c.get("tr"))
-    p.log(f"翻譯完成，{len(cues) - missing}/{len(cues)} 條（對位重譯 {stats['retried']} 次）"
+    missing = sum(1 for c in cues if not c.get("tr") and not c.get("same"))
+    same = sum(1 for c in cues if c.get("same"))
+    p.log(f"翻譯完成，{len(cues) - missing}/{len(cues)} 條（對位重譯 {stats['retried']} 次"
+          + (f"，{same} 條本來就是目標語言、不翻" if same else "") + "）"
           + (f"（{missing} 條缺譯，可按「補翻缺少的譯文」）" if missing else ""))
 
 

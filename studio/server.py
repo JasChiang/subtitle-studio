@@ -237,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
                         c["cin"], c["cout"] = a, b
                 return self.send_json(doc)
             if sub == "reference":
-                return self.send_json(p.read("reference.json") or {})
+                return self.send_json({**(p.read("reference.json") or {}), "languages": p.read("languages.json")})
             if sub == "media":
                 return self.send_file(p.media)
             if sub == "overlay":  # live-preview layer, drawn by the same renderer as the export
