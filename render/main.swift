@@ -11,7 +11,8 @@ import AppKit
 import Foundation
 
 struct Item: Decodable { let out: String; let kind: String; let lines: [String] }
-struct Spec: Decodable { let width: Int; let height: Int; let items: [Item]; let han: String? }
+struct Spec: Decodable { let width: Int; let height: Int; let items: [Item]; let han: String?; let scale: Double? }
+var subScale: CGFloat = 1  // subtitle font size multiplier (project setting sub_scale)
 var hanVariant = "TC"  // Chinese glyph forms for Han-only lines: TC (Taiwan) / SC (mainland) / HK
 
 let outlineColor = NSColor(white: 0.05, alpha: 1)
@@ -94,7 +95,7 @@ func render(_ it: Item, w: Int, h: Int) throws {
         // bottom-centred: line 1 = 56 white semibold, line 2 = 38 pale regular (same as .ov-a / .ov-b)
         var y = 46 * u
         for (i, line) in it.lines.enumerated().reversed() where !line.isEmpty {
-            let size = (i == 0 ? 56 : 38) * u
+            let size = (i == 0 ? 56 : 38) * u * subScale
             let weight: NSFont.Weight = i == 0 ? .semibold : .regular
             let base: NSColor = i == 0 ? .white : pale
             // karaoke markup: "\u{1}" starts and "\u{2}" ends a run of already-spoken words
@@ -140,6 +141,7 @@ let data = FileHandle.standardInput.readDataToEndOfFile()
 do {
     let spec = try JSONDecoder().decode(Spec.self, from: data)
     hanVariant = ["TC", "SC", "HK"].contains(spec.han ?? "") ? spec.han! : "TC"
+    subScale = CGFloat(min(max(spec.scale ?? 1, 0.5), 2))
     for it in spec.items { try render(it, w: spec.width, h: spec.height) }
     print("rendered \(spec.items.count)")
 } catch {

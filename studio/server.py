@@ -20,6 +20,53 @@ PROJECTS = ROOT / "projects"
 STATIC = ROOT / "static"
 RUNNING: dict[str, threading.Thread] = {}
 LOCALES: list[str] = []
+IMPORTS: dict[str, dict] = {}  # YouTube / web video downloads: id → {state, progress, path, title, error}
+
+
+def start_import(url: str) -> str:
+    """Download a web video (YouTube etc.) with yt-dlp into uploads/, reporting progress."""
+    import shutil
+    import subprocess
+    if not shutil.which("yt-dlp"):
+        raise RuntimeError("需要 yt-dlp：brew install yt-dlp")
+    if not re.match(r"https?://", url):
+        raise ValueError("請貼上完整網址（https://…）")
+    jid = time.strftime("%Y%m%d-%H%M%S")
+    job = IMPORTS[jid] = {"state": "running", "progress": 0.0, "path": None, "title": "", "error": None}
+    up = ROOT / "uploads"
+    up.mkdir(exist_ok=True)
+
+    def work():
+        try:
+            proc = subprocess.Popen(
+                ["yt-dlp", "--newline", "--no-playlist", "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/b",
+                 "--merge-output-format", "mp4", "-o", str(up / "%(title).60s [%(id)s].%(ext)s"),
+                 "--print", "before_dl:TITLE\t%(title)s", "--print", "after_move:FILE\t%(filepath)s", url],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            lines, path = [], None
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                if m:
+                    job["progress"] = min(0.99, float(m.group(1)) / 100)
+                elif line.startswith("TITLE\t"):
+                    job["title"] = line[6:]
+                elif line.startswith("FILE\t"):
+                    path = line[5:]
+                elif line.strip():
+                    lines.append(line.strip())
+            if proc.wait() != 0:
+                raise RuntimeError("下載失敗：" + (next((l for l in reversed(lines) if "ERROR" in l), None)
+                                               or (lines[-1] if lines else "yt-dlp error")))
+            path = path if path and Path(path).exists() else None
+            if not path:
+                raise RuntimeError("下載完成但找不到檔案")
+            job.update(state="done", progress=1.0, path=path)
+        except Exception as e:
+            job.update(state="error", error=str(e))
+
+    threading.Thread(target=work, daemon=True).start()
+    return jid
 
 
 def load_env():
@@ -202,6 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                 LOCALES = subprocess.run([str(pipeline.ASR_BIN), "--list-locales"], capture_output=True,
                                          text=True, timeout=60).stdout.split()
             return self.send_json(LOCALES or ["en-US", "zh-TW"])
+        if parts[:2] == ["api", "import-url"] and len(parts) == 3:
+            return self.send_json(IMPORTS[parts[2]])
         if parts == ["api", "projects"]:
             out = []
             for d in sorted(PROJECTS.glob("*/project.json"), reverse=True):
@@ -305,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
             if not media.is_file():
                 raise ValueError(f"找不到檔案：{media}")
             return self.send_json(create_project(media, b.get("options", {})))
+        if parts == ["api", "import-url"]:
+            return self.send_json({"id": start_import(self.body_json().get("url", "").strip())})
         if parts == ["api", "upload"]:
             name = urllib.parse.unquote(self.headers.get("X-Filename", "upload.mp4"))
             n = int(self.headers["Content-Length"])

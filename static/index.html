@@ -163,6 +163,9 @@
     <label for="pathInput">影片檔案（直接讀原檔，不會複製）</label>
     <div class="row gap"><input id="pathInput" class="grow path-input" placeholder="/Users/…/video.mp4"><button type="button" id="browseBtn">瀏覽</button></div>
     <div id="browser" class="browser" hidden></div>
+    <label for="urlInput">或貼上 YouTube 等影片網址（會下載到 uploads/）</label>
+    <div class="row gap"><input id="urlInput" class="grow path-input" placeholder="https://www.youtube.com/watch?v=…"><button type="button" id="urlBtn">下載</button></div>
+    <div id="urlStatus" class="hint"></div>
     <div id="drop" class="drop">也可以把影片拖到這裡上傳（會複製一份到 uploads/）</div>
     <div class="grid2">
       <label>說話的語言<select id="newLocale"></select></label>

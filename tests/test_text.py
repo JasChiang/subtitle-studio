@@ -40,9 +40,16 @@ class Scripts(unittest.TestCase):
 
     def test_line_length_defaults(self):
         words = lambda s: [{"t": t, "s": 0, "e": 0} for t in pl.tokenize(s)]
-        self.assertEqual(pl.cue_limits(words("這是中文句子"), {"max_chars": 0})[1], 22)
-        self.assertEqual(pl.cue_limits(words("한국어 문장입니다"), {"max_chars": 0})[1], 30)
-        self.assertEqual(pl.cue_limits(words("an English line"), {"max_chars": 0})[1], 70)
+        self.assertEqual(pl.cue_limits(words("這是中文句子"), {"max_chars": 0})[1], 16)
+        self.assertEqual(pl.cue_limits(words("한국어 문장입니다"), {"max_chars": 0})[1], 20)
+        self.assertEqual(pl.cue_limits(words("an English line"), {"max_chars": 0})[1], 42)
+        self.assertEqual(pl.cue_limits(words("an English line"), {"max_chars": 30})[1], 30)
+
+    def test_translation_line_length_follows_target_language(self):
+        self.assertEqual(pl.target_line_limit({"target_lang": "繁體中文（台灣）"}), 16)
+        self.assertEqual(pl.target_line_limit({"target_lang": "日本語"}), 16)
+        self.assertEqual(pl.target_line_limit({"target_lang": "Korean"}), 20)
+        self.assertEqual(pl.target_line_limit({"target_lang": "English"}), 42)
 
 
 class Spacing(unittest.TestCase):

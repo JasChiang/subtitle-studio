@@ -38,7 +38,9 @@ DEFAULT_OPTIONS = {
     "correct_with_audio": True,    # correction also listens to the audio of each chunk
     "reasr_segments": True,        # whole sentences in another language → re-run Apple ASR in that language
     "cjk_spacing": True,           # half-width space between CJK and Latin letters / digits in Chinese text
-    "max_chars": 0,                # 0 = auto by script (Latin 70, CJK 22)
+    "max_chars": 0,                # 0 = auto by script: Latin 42, Chinese / Japanese 16, Korean 20 per line
+    "sub_scale": 100,              # subtitle font size, % of the default (preview and export alike)
+    "loudnorm": True,              # exports: normalise loudness to -14 LUFS (YouTube's reference)
     "max_duration": 6.5,
     "gap_break": 0.7,
     "translate": True,
@@ -957,9 +959,22 @@ CLAUSE_END = tuple(",;:，；：、—")
 CONJ = {"and", "but", "so", "because", "which", "that", "or", "when", "if", "where", "who", "then", "like"}
 
 
+LINE_LIMIT = {"cjk": 16, "hangul": 20, "latin": 42}  # common subtitle line lengths (characters per line)
+
+
+def target_line_limit(o: dict) -> int:
+    """Line length for TRANSLATIONS, by target language."""
+    t = (o.get("target_lang") or "").lower()
+    if is_chinese(t) or any(w in t for w in ("日本", "japan", "ja")):
+        return LINE_LIMIT["cjk"]
+    if any(w in t for w in ("韓", "한국", "korean", "ko")):
+        return LINE_LIMIT["hangul"]
+    return LINE_LIMIT["latin"]
+
+
 def cue_limits(words: list[dict], o: dict) -> tuple[bool, int]:
     script = script_of(join_tokens([w["t"] for w in words[:400]]))
-    return script == "cjk", o["max_chars"] or {"cjk": 22, "hangul": 30}.get(script, 70)
+    return script == "cjk", o["max_chars"] or LINE_LIMIT.get(script, 42)
 
 
 def build_cues(words: list[dict], o: dict) -> list[dict]:
@@ -1357,7 +1372,9 @@ def stage_translate(p: Project, only_missing: bool = False):
         "THAT CUE. If the target language needs a different word order, restructure the translation so every "
         "part still matches its own cue — never put one cue's meaning into a neighbouring cue, and never swap "
         "content between cues. Keep it concise for on-screen reading; no trailing full stop on a cue unless it "
-        "is a question or exclamation. A cue whose text has two lines starting with '- ' is two people speaking "
+        "is a question or exclamation. Keep each cue's translation short enough to read on screen — about "
+        f"{target_line_limit(o)} characters or less (condense the wording if needed, never drop meaning). "
+        "A cue whose text has two lines starting with '- ' is two people speaking "
         "at once: translate it as '－第一人的話　－第二人的話' on ONE line. For every cue also return `echo` = the "
         "first 3 words (or first 4 characters) of that cue's own source text, copied exactly — it is used to "
         "check that each translation is attached to the right cue. If a cue is ALREADY entirely in the target "

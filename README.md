@@ -67,7 +67,7 @@ Apple 語音辨識支援的語言都能用（英、中〔台灣／中國／香�
 
 ## 使用
 
-1. 「＋ 新增影片」：輸入路徑或按「瀏覽…」（直接讀原檔、不複製），也可以把檔案拖曳上傳（會複製到 `uploads/`）。
+1. 「新增影片」：輸入路徑或按「瀏覽」（直接讀原檔、不複製）、貼上 YouTube 等影片網址（用 `yt-dlp` 下載到 `uploads/`，需 `brew install yt-dlp`），或把檔案拖曳上傳。語言預設「自動判斷」。
 2. 選 ASR 語言，填「影片脈絡」（誰、什麼節目）和「詞彙表」（人名、品牌、術語）。這兩項能明顯提升人名與專有名詞的準確度。
 3. 建立後會自動跑完整流程，右側面板顯示進度、log 與 Gemini 花費。
 4. 在下方字幕表直接修改，存檔後匯出。
@@ -148,7 +148,8 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | `chunk_minutes` | 10 | 參考稿每段長度 |
 | `drop_fillers` | true | 移除 um／uh／嗯／呃 |
 | `semantic_breaks` / `seg_thinking` | true / low | 語意斷句開關與 Gemini 思考程度（low／medium／high） |
-| `max_chars` / `max_duration` / `gap_break` | 0（自動）/ 6.5 / 0.7 | 一行好讀的長度參考，以及規則斷句的參數 |
+| `max_chars` / `max_duration` / `gap_break` | 0（自動：英 42、中／日 16、韓 20）/ 6.5 / 0.7 | 每行字數上限（斷句與翻譯都會參考），以及規則斷句的參數 |
+| `sub_scale` / `loudnorm` | 100 / true | 字幕字級（%，預覽與輸出相同）；輸出影片時統一音量到 -14 LUFS |
 | `target_lang` / `translate_style` | 繁體中文（台灣）／（自動） | 翻譯目標語言；風格留空時依目標語言自動決定 |
 | `karaoke` / `sub_order` | false / 譯文在上 | 逐字變色、雙語上下順序（預覽與輸出共用） |
 | `correct_with_audio` / `energy_snap` / `backchannels` | true / true / 省略 | 校正時聽音訊、依音量校正字的邊界、附和（mm-hmm）怎麼處理 |

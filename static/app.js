@@ -23,7 +23,7 @@ const OPT_FIELDS = [
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
   ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["cjk_spacing", "中文與英文／數字之間加半形空格", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
-  ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
+  ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
   ["target_lang", "目標語言（例：繁體中文（台灣）、简体中文、日本語、English）", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
 ];
@@ -550,6 +550,23 @@ drop.addEventListener("drop", (e) => {
   xhr.onerror = () => drop.textContent = "上傳失敗";
   xhr.send(f);
 });
+$("#urlBtn").onclick = async () => {
+  const url = $("#urlInput").value.trim();
+  if (!url) return;
+  $("#urlBtn").disabled = true;
+  try {
+    const { id } = await api("/api/import-url", { method: "POST", body: { url } });
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const j = await api(`/api/import-url/${id}`);
+      $("#urlStatus").textContent = j.state === "running" ? `下載中 ${Math.round(j.progress * 100)}%${j.title ? "：" + j.title : ""}`
+        : j.state === "done" ? `已下載：${j.title || j.path}` : `下載失敗：${j.error}`;
+      if (j.state === "done") { $("#pathInput").value = j.path; break; }
+      if (j.state === "error") break;
+    }
+  } catch (err) { $("#urlStatus").textContent = err.message; }
+  $("#urlBtn").disabled = false;
+};
 $("#createBtn").onclick = async (e) => {
   e.preventDefault();
   try {

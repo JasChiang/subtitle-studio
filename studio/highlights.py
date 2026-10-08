@@ -471,13 +471,14 @@ def overlay_png(p: Project, kind: str, lines: list[str]) -> Path:
              else l for l in lines]
     W, H = project_size(p)
     han = han_variant(p.options)
-    key = hashlib.sha1(json.dumps([kind, lines, W, H, han, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
+    scale = sub_scale(p)
+    key = hashlib.sha1(json.dumps([kind, lines, W, H, han, scale, RENDER_BIN.stat().st_mtime], ensure_ascii=False)
                        .encode()).hexdigest()[:20]
     out = p.dir / "overlays" / f"{key}.png"
     if not out.exists():
         out.parent.mkdir(exist_ok=True)
         tmp = out.with_suffix(f".{threading.get_ident()}.tmp.png")
-        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han, "items": [
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han, "scale": scale, "items": [
             {"out": str(tmp), "kind": kind, "lines": lines}]}).encode(), check=True, capture_output=True)
         tmp.replace(out)
     return out
@@ -539,6 +540,8 @@ def render_full(p: Project, req: dict) -> Path:
         tmp = out.with_suffix(".part.mp4")
         proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(p.media), "-i", str(srt),
                                "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:s", "-c", "copy", "-c:s", "mov_text",
+                               *(["-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k"]
+                                 if p.options.get("loudnorm", True) else []),
                                "-metadata:s:s:0", "language=chi", "-dn", "-write_tmcd", "0", "-movflags", "+faststart", str(tmp)],
                               capture_output=True, text=True)
         if proc.returncode != 0:
@@ -570,7 +573,14 @@ def probe_fps(path: Path) -> str:
     return r if r and r != "0/0" else "30000/1001"
 
 
-def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4, han: str = "TC"):
+def sub_scale(p: Project) -> float:
+    try:
+        return round(max(50, min(200, float(p.options.get("sub_scale") or 100))) / 100, 2)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4, han: str = "TC", scale: float = 1.0):
     """Run bin/text-render on several batches at once — a full hour of word-by-word subtitles is thousands
     of images."""
     from concurrent.futures import ThreadPoolExecutor
@@ -578,7 +588,7 @@ def draw_overlays(items: list[dict], W: int, H: int, procs: int = 4, han: str = 
     chunks = [items[k:k + size] for k in range(0, len(items), size)]
 
     def run(chunk):
-        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han,
+        subprocess.run([str(RENDER_BIN)], input=json.dumps({"width": W, "height": H, "han": han, "scale": scale,
                                                             "items": chunk}).encode(), check=True, capture_output=True)
 
     with ThreadPoolExecutor(max_workers=procs) as ex:
@@ -631,7 +641,7 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
         tag_ev.append((t0 + cd, t1, ft))
         blur_spans.append((t0, t0 + cd))
     p.log(f"  繪製 {len(items) - 1} 張字幕／字卡圖")
-    draw_overlays(items, W, H, han=han_variant(p.options))
+    draw_overlays(items, W, H, han=han_variant(p.options), scale=sub_scale(p))
     blank = str(work / "blank.png")
     tracks = []
     for name, ev in (("subs", sub_ev), ("cards", card_ev), ("tags", tag_ev)):
@@ -652,7 +662,8 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
                f"afade=t=out:st={max(0, d - 0.06):.3f}:d=0.06[a{i}];")
         cat += f"[v{i}][a{i}]"
     n = len(pieces)
-    fc += f"{cat}concat=n={n}:v=1:a=1[vc][ac];"
+    fc += f"{cat}concat=n={n}:v=1:a=1[vc][ac0];"
+    fc += ("[ac0]loudnorm=I=-14:TP=-1.5:LRA=11[ac];" if p.options.get("loudnorm", True) else "[ac0]anull[ac];")
     cur = "vc"
     if blur_spans:
         en = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in blur_spans)
