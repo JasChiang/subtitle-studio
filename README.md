@@ -1,32 +1,110 @@
 # Subtitle Studio
 
-本機 web GUI：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，可在瀏覽器裡對著影片逐條修字幕、匯出 SRT。
-做法沿用 caption-lab：參考稿不看 ASR 文字（獨立第二意見），時間碼一律來自 Apple 的字級時鐘，Gemini 只改文字。
+本機 web GUI 字幕工作台：**Apple 裝置端 ASR 取得字級時間碼 → Gemini 看影片做獨立參考稿 → 校正文字 → 斷句 → 翻譯**，並能在瀏覽器裡對著影片逐條修字幕、匯出 SRT／VTT。
 
-## 用法
+做法沿用 [caption-lab](https://github.com/JasChiang/caption-lab) 的原則：
+
+- **時間碼只來自 Apple。** `SpeechTranscriber` 給每個字的 audioTimeRange，Gemini 只改文字、不碰時間。
+- **參考稿要獨立。** Gemini 看影片聽寫時看不到 ASR 文字，這樣兩邊不會互相帶偏，同音字、專有名詞的錯誤才抓得出來。
+
+## 需求
+
+- Apple Silicon Mac，**macOS 26+**（`SpeechTranscriber` / `SpeechAnalyzer`）
+- Swift toolchain（Xcode 或 Command Line Tools 皆可，只用 Speech／AVFoundation，不需 SwiftUI）
+- `ffmpeg`／`ffprobe`（`brew install ffmpeg`）
+- Python 3.10+（只用標準函式庫，免裝套件）
+- Gemini API key（[Google AI Studio](https://aistudio.google.com/apikey)）
+
+## 安裝與啟動
+
 ```bash
-./setup.sh          # 編譯 bin/apple-asr（macOS 26+、swiftc、ffmpeg），建立 .env
+./setup.sh          # 編譯 bin/apple-asr、從 .env.example 建立 .env
 # 編輯 .env：GEMINI_API_KEY=...
-./run.sh            # 開 http://127.0.0.1:8765
+./run.sh            # 啟動伺服器並開啟 http://127.0.0.1:8765（PORT=xxxx ./run.sh 可換埠）
 ```
-GUI：「＋ 新增影片」→ 選檔（直接讀原檔，不複製）/ 拖曳上傳 → 填語言、影片脈絡、詞彙表 → 建立後自動跑完整流程。
 
-不開 GUI：`python3 -m studio.cli <video> --opt locale=en-US --opt 'context=…'`，或 `--project <id> --stages cues,translate` 重跑部分步驟。
+第一次用某個語言時，macOS 會自動下載對應的語音模型。
 
-## 步驟（每步都有快取，可單獨重跑）
-| 步驟 | 內容 | 產物 |
+## 使用
+
+1. 「＋ 新增影片」：輸入路徑或按「瀏覽…」（直接讀原檔、不複製），也可以把檔案拖曳上傳（會複製到 `uploads/`）。
+2. 選 ASR 語言，填「影片脈絡」（誰、什麼節目）和「詞彙表」（人名、品牌、術語）。這兩項能明顯提升人名與專有名詞的準確度。
+3. 建立後會自動跑完整流程，右側面板顯示進度、log 與 Gemini 花費。
+4. 在下方字幕表直接修改，存檔後匯出。
+
+### 不開 GUI
+
+```bash
+python3 -m studio.cli <video> --opt locale=en-US --opt 'context=…' --opt 'glossary=…'
+python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分步驟
+```
+
+## 流程
+
+| 步驟 | 內容 | 產物（`projects/<id>/`） |
 |---|---|---|
-| asr | ffmpeg 抽 16k 音軌 → SpeechTranscriber（字級 audioTimeRange） | `asr.json` |
-| reference | 依「每段分鐘數」切 360p/2fps 代理檔上傳 File API，Gemini 逐字聽寫＋講者＋專有名詞 | `reference/chunk_*.json`, `reference.json` |
-| correct | 把 ASR 段落＋同時段參考稿交給 Gemini（文字）校正；段內換講者標 `||` | `corrected.json` |
-| cues | difflib 把校正文字對齊回 ASR 字級時間（相同／一對一替換沿用原時間，新增字在空隙內分配），再依標點、停頓、長度斷句 | `cues.json` |
-| translate | 每 60 條一批翻譯（含前後文），預設台灣繁中 | `cues.json` 的 `tr` |
+| **asr** | ffmpeg 抽 16 kHz 單聲道音軌 → `bin/apple-asr`（SpeechTranscriber，字級時間碼） | `audio.wav`, `asr.json` |
+| **reference** | 依「每段分鐘數」切成 360p／2 fps 的代理檔，用 File API 上傳；Gemini 逐字聽寫，並標出講者與專有名詞（3 段並行） | `reference/chunk_*.json`, `reference.json` |
+| **correct** | 把 ASR 段落和同時段的參考稿一起交給 Gemini（純文字）校正；段落中途換講者時標 `\|\|` | `corrected.json` |
+| **cues** | 以 60 段為一個視窗，用 difflib 把校正後的文字對回 ASR 字級時間，再依標點、停頓、長度、換講者斷句 | `cues.json` |
+| **translate** | 每 60 條一批，帶前後文翻譯（預設台灣繁中） | `cues.json` 的 `tr` |
 
-專案資料在 `projects/<id>/`。表格內手動修改存回 `cues.json`；重跑「斷句」會覆蓋手改（原文相同的譯文會沿用）。
+每步都有快取，可以單獨重跑；勾選「強制重算」會忽略快取。
 
-## 編輯器快速鍵
-⌥Space 播放／暫停 · ⌥[ / ⌥] 把目前字幕的入點／出點設成播放點 · ⌥S 在播放點切開 · ⌥← ⌥→ 跳 2 秒 · ⌘S 存檔。
-點 # 欄跳到該條；✎ 標記代表校正後與 ASR 不同（滑過可看 ASR 原文）。
+### 對齊細節
+
+- 字相同、或一對一替換的字，沿用 ASR 原本的時間；多出或缺少的字，在對應的 ASR 區間或空隙內依字數分配時間。
+- 用視窗而不是逐段對齊，是因為 LLM 偶爾會把字搬到相鄰段落，即使 prompt 禁止。整個視窗一起比對，被搬走的字仍會落回正確的時間點。
+- 斷句預設：英文每條 ≤ 70 字元、中文 ≤ 22 字、每條 ≤ 6.5 秒，停頓超過 0.7 秒就強制斷開；斷點優先選句號 > 逗號 > 連接詞。插話的極短字幕（例如另一個人說的「Yeah.」）會併入下一條，避免時間重疊。
+
+## 編輯器
+
+| 操作 | 方式 |
+|---|---|
+| 播放／暫停 | ⌥Space |
+| 把目前字幕的入點／出點設成播放點 | ⌥[ / ⌥] |
+| 在播放點切開 | ⌥S（有字級時間時會精確切在字與字之間） |
+| 前後跳 2 秒 | ⌥← / ⌥→ |
+| 存檔 | ⌘S |
+| 跳到某條 | 點 # 欄或 ▶ |
+
+- ✎ 標記表示這條校正後與 ASR 不同，下方會顯示 ASR 原文；勾「只看校正有改的」可以集中檢查。
+- 「補翻缺譯」只翻譯還沒有譯文的字幕條（例如手動切開、合併之後）。
+- 重跑「斷句」會覆蓋手動修改；原文沒變的字幕條，舊譯文會自動沿用。
 
 ## 匯出
-雙語 SRT（原文在上／譯文在上）、原文 SRT、譯文 SRT、VTT、字級 JSON。
+
+雙語 SRT（原文在上或譯文在上）、原文 SRT、譯文 SRT、VTT、字級 JSON（含每個字的時間）。
+
+## 設定（每個專案各自保存）
+
+| 選項 | 預設 | 說明 |
+|---|---|---|
+| `locale` | `en-US` | ASR 語言（支援清單見 `bin/apple-asr --list-locales`） |
+| `ref_model` | `gemini-flash-latest` | 看影片的模型；`gemini-pro-latest` 更準、較貴 |
+| `text_model` | `gemini-flash-latest` | 校正與翻譯用的模型 |
+| `chunk_minutes` | 10 | 參考稿每段長度 |
+| `drop_fillers` | true | 移除 um／uh／嗯／呃 |
+| `max_chars` / `max_duration` / `gap_break` | 0（自動）/ 6.5 / 0.7 | 斷句參數 |
+| `target_lang` / `translate_style` | 繁體中文（台灣） | 翻譯目標語言與風格 |
+
+## 花費參考
+
+以一部 58 分鐘的英文訪談實測：Gemini Flash 跑完整流程約 **US$0.67**、約 8 分鐘（ASR 1 分鐘、參考稿 3 分鐘、校正 2.5 分鐘、翻譯 2 分鐘）。GUI 右上角會顯示估算花費。
+
+## 專案結構
+
+```
+asr/main.swift        Apple SpeechTranscriber CLI → 字級時間 JSON（stderr 回報進度）
+studio/pipeline.py    各步驟、對齊、斷句、匯出
+studio/gemini.py      Gemini REST（File API 上傳、JSON schema 輸出、遇暫時性錯誤時換模型）
+studio/server.py      標準函式庫 HTTP server（API、支援 Range 的影片串流、背景執行）
+studio/cli.py         無介面執行
+static/               單頁前端（原生 JS）
+```
+
+## 已知限制
+
+- Gemini 偶爾不完全遵守「逐字」規則（例如把 gonna 改成 going to），或聽錯少數字；建議用「只看校正有改的」快速檢查一遍。
+- 參考稿的講者標籤是每段各自判斷的，偶爾會不一致，只影響換講者時的斷句。
+- 伺服器只綁 `127.0.0.1`，不做身分驗證，請不要對外開放。

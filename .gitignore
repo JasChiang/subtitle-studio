@@ -1,6 +1,36 @@
+# Secrets — copy .env.example to .env
 .env
+.env.*
+!.env.example
+
+# Per-video working data (audio, transcripts, Gemini outputs, edited cues) and uploaded media
 projects/
 uploads/
+
+# Build output (./setup.sh recreates bin/apple-asr)
 bin/
+.build/
+
+# Python
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Media / exports that shouldn't be committed
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.webm
+*.wav
+*.m4a
+*.mp3
+*.srt
+*.vtt
+
+# Editors / OS
 .DS_Store
+.vscode/
+.idea/
+*.swp

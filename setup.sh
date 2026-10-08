@@ -7,4 +7,4 @@ mkdir -p bin
 swiftc -O -parse-as-library asr/main.swift -o bin/apple-asr
 echo "built bin/apple-asr — supported locales:"
 ./bin/apple-asr --list-locales | tr '\n' ' '; echo
-[ -f .env ] || { echo "GEMINI_API_KEY=" > .env; chmod 600 .env; echo "已建立 .env，請填入 GEMINI_API_KEY"; }
+[ -f .env ] || { cp .env.example .env; chmod 600 .env; echo "已建立 .env，請填入 GEMINI_API_KEY"; }
