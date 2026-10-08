@@ -464,36 +464,54 @@ def asr_units(seg: dict) -> list[dict]:
 
 
 def align_segment(seg: dict, corrected: str) -> list[dict]:
-    """Map corrected text onto the ASR word clock. Equal/1:1-replaced tokens keep ASR times; others are spread."""
-    src = asr_units(seg)
-    parts = corrected.split("||")
+    return align_window([seg], [corrected])
+
+
+def align_window(segs: list[dict], texts: list[str], seg_offset: int = 0) -> list[dict]:
+    """Map corrected text onto the ASR word clock across a window of segments. The LLM sometimes moves words
+    into a neighbouring segment, so we match the whole window's text at once instead of segment by segment.
+    Equal / 1:1-replaced tokens keep ASR times; the rest are spread over the matching ASR span or gap."""
+    src: list[dict] = []
+    for si, seg in enumerate(segs):
+        for u in asr_units(seg):
+            u["seg"] = seg_offset + si
+            src.append(u)
     dst: list[dict] = []
-    for pi, part in enumerate(parts):
-        toks = tokenize(part.strip())
-        for j, t in enumerate(toks):
-            dst.append({"t": t, "spk": pi > 0 and j == 0})
+    for text in texts:
+        for pi, part in enumerate(text.split("||")):
+            for j, t in enumerate(tokenize(part.strip())):
+                dst.append({"t": t, "spk": pi > 0 and j == 0})
     if not dst:
         return []
-    a = [norm(u["t"]) for u in src]
-    b = [norm(u["t"]) for u in dst]
-    sm = SequenceMatcher(None, a, b, autojunk=False)
+    w_lo, w_hi = segs[0]["start"], segs[-1]["end"]
+    if not src:
+        spread(dst, w_lo, w_hi)
+        for u in dst:
+            u["seg"] = seg_offset
+        return dst
+    sm = SequenceMatcher(None, [norm(u["t"]) for u in src], [norm(u["t"]) for u in dst], autojunk=False)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
             for k in range(j2 - j1):
-                dst[j1 + k]["s"], dst[j1 + k]["e"] = src[i1 + k]["s"], src[i1 + k]["e"]
+                u = src[i1 + k]
+                dst[j1 + k].update(s=u["s"], e=u["e"], seg=u["seg"])
         elif tag == "replace":
             spread(dst[j1:j2], src[i1]["s"], src[i2 - 1]["e"])
+            for u in dst[j1:j2]:
+                u["seg"] = src[i1]["seg"]
         elif tag == "insert":
-            lo = src[i1 - 1]["e"] if i1 > 0 else seg["start"]
-            hi = src[i1]["s"] if i1 < len(src) else seg["end"]
+            lo = src[i1 - 1]["e"] if i1 > 0 else w_lo
+            hi = src[i1]["s"] if i1 < len(src) else w_hi
             if hi - lo < 0.08 * (j2 - j1):  # no room: borrow a little from both neighbours
-                lo, hi = max(seg["start"], lo - 0.12), min(seg["end"], hi + 0.12)
+                lo, hi = max(w_lo, lo - 0.12), min(w_hi, hi + 0.12)
             spread(dst[j1:j2], lo, max(lo, hi))
-    # monotonic clean-up
-    last = seg["start"]
-    for u in dst:
+            for u in dst[j1:j2]:
+                u["seg"] = src[i1 - 1]["seg"] if i1 > 0 else src[0]["seg"]
+    last = w_lo
+    for u in dst:  # monotonic clean-up
         u["s"] = max(u.get("s", last), last)
         u["e"] = max(u.get("e", u["s"]), u["s"])
+        u.setdefault("seg", seg_offset)
         last = u["s"]
     return dst
 
@@ -551,6 +569,15 @@ def build_cues(words: list[dict], o: dict) -> list[dict]:
         cur.append(w)
     if cur:
         cues.append(cur)
+    # a cue whose successor starts almost at once (an overlapping "Yeah." from the other speaker) can't be
+    # shown on its own — fold it into the next cue
+    merged: list[list[dict]] = []
+    for ws in reversed(cues):
+        if merged and merged[0][0]["s"] - ws[0]["s"] < 0.3:
+            merged[0] = ws + merged[0]
+        else:
+            merged.insert(0, ws)
+    cues = merged
 
     out = []
     for i, ws in enumerate(cues):
@@ -559,7 +586,8 @@ def build_cues(words: list[dict], o: dict) -> list[dict]:
         end = min(end, nxt - 0.04)
         if end - start < 0.8:
             end = min(start + 0.8, nxt - 0.04)
-        out.append({"start": round(start, 3), "end": round(max(end, start + 0.2), 3),
+        end = min(max(end, start + 0.2), nxt - 0.02)
+        out.append({"start": round(start, 3), "end": round(end, 3),
                     "text": join_tokens([w["t"] for w in ws]),
                     "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3)} for w in ws],
                     "spk": bool(ws[0].get("spk"))})
@@ -574,10 +602,10 @@ def stage_cues(p: Project):
         p.log("  （沒有校正結果，直接用 ASR 原文）")
         corr = [s["text"] for s in asr["segments"]]
     words = []
-    for si, (seg, text) in enumerate(zip(asr["segments"], corr)):
-        for u in align_segment(seg, text):
-            u["seg"] = si
-            words.append(u)
+    win = 60
+    segs = asr["segments"]
+    for k in range(0, len(segs), win):
+        words += align_window(segs[k:k + win], corr[k:k + win], seg_offset=k)
     cues = build_cues(words, o)
     # keep the raw ASR text per cue for the "what changed" view
     asr_words = [(u["s"], u["t"]) for seg in asr["segments"] for u in asr_units(seg)]
