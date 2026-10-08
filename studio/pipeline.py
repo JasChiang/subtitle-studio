@@ -38,6 +38,8 @@ DEFAULT_OPTIONS = {
     "gap_break": 0.7,
     "translate": True,
     "target_lang": "繁體中文（台灣）",
+    "karaoke": False,              # word-by-word highlight, in the web preview AND the burned-in video
+    "sub_order": "tr-first",       # bilingual line order, shared by the web preview and burned-in video
     "translate_style": "台灣用語、口語通順自然；人名用台灣慣用譯名；保留品牌與專有名詞原文",
     "workers": 4,
 }

@@ -47,13 +47,20 @@ func render(_ it: Item, w: Int, h: Int) throws {
     NSRect(x: 0, y: 0, width: W, height: H).fill()
     let margin = W * 0.07
     let yellow = NSColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
+    let karaoke = NSColor(red: 0.5, green: 0.94, blue: 0.81, alpha: 1)  // #7ff0cf, same as the web preview
     switch it.kind {
     case "sub":
         // bottom-centred: first line large white, second (translation / original) smaller pale
         var y = 46 * u
         for (i, line) in it.lines.enumerated().reversed() where !line.isEmpty {
-            let s = attr(line, size: (i == 0 ? 56 : 38) * u, weight: i == 0 ? .bold : .regular,
-                         color: i == 0 ? .white : NSColor(red: 0.85, green: 0.9, blue: 0.94, alpha: 1), stroke: 3.2)
+            // "\u{1}" marks the karaoke split: text before it is already spoken (highlight colour)
+            let parts = line.components(separatedBy: "\u{1}")
+            let base: NSColor = i == 0 ? .white : NSColor(red: 0.85, green: 0.9, blue: 0.94, alpha: 1)
+            let s = NSMutableAttributedString()
+            for (k, part) in parts.enumerated() {
+                s.append(attr(part, size: (i == 0 ? 56 : 38) * u, weight: i == 0 ? .bold : .regular,
+                              color: parts.count > 1 && k == 0 ? karaoke : base, stroke: 3.2))
+            }
             let r = s.boundingRect(with: NSSize(width: W - 2 * margin, height: H), options: [.usesLineFragmentOrigin])
             s.draw(with: NSRect(x: margin, y: y, width: W - 2 * margin, height: ceil(r.height)),
                    options: [.usesLineFragmentOrigin])

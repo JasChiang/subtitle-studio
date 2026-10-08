@@ -44,10 +44,17 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .player { flex: 1.4; min-width: 0; }
 .video-wrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
 video { width: 100%; max-height: 46vh; display: block; }
-.overlay { position: absolute; left: 4%; right: 4%; bottom: 13%; text-align: center; pointer-events: none; text-shadow: 0 0 4px #000, 0 1px 2px #000; }
-.ov-src { color: #fff; font-size: clamp(13px, 1.9vw, 22px); font-weight: 600; }
-.ov-tr { color: #ffe680; font-size: clamp(13px, 1.8vw, 21px); font-weight: 600; margin-top: 2px; }
-.ov-src .w.on { color: #7ff0cf; }
+/* Same style as the burned-in subtitles (render/main.swift): sizes are in 1080p units, --u = shown height / 1080 */
+.overlay { position: absolute; text-align: center; pointer-events: none; --u: 0.5;
+  font-family: "PingFang TC", -apple-system, sans-serif; line-height: 1.3; }
+.ov-a, .ov-b { -webkit-text-stroke: 0.032em #0d0d0d; paint-order: stroke fill;
+  text-shadow: 0 0.04em 0.12em rgba(0,0,0,.85); overflow-wrap: anywhere; }
+.ov-a { color: #fff; font-weight: 600; font-size: calc(var(--u) * 56px); }
+.ov-b { color: #d9e6f0; font-weight: 400; font-size: calc(var(--u) * 38px); margin-top: calc(var(--u) * 6px); }
+.ov-a:empty, .ov-b:empty { display: none; }
+.overlay .w.on { color: #7ff0cf; }
+.reel-banner { background: var(--hi); padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+.reel-banner button { padding: 1px 8px; margin-left: 6px; }
 .player-bar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 6px 2px; }
 .player-bar label { display: inline-flex; gap: 4px; align-items: center; }
 

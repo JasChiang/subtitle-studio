@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from . import gemini
-from .pipeline import ROOT, Project, fmt_mmss, ts
+from .pipeline import ROOT, Project, fmt_mmss, join_tokens, ts
 
 RENDER_BIN = ROOT / "bin" / "text-render"
 CARD = 1.7     # seconds of blurred background + chapter card at the start of each chapter
@@ -203,18 +203,41 @@ def timeline(plan: dict):
     return pieces
 
 
-def reel_subs(pieces, cues: list[dict]) -> list[tuple[float, float, list[str]]]:
+def reel_subs(pieces, cues: list[dict], tr_first: bool = True, karaoke: bool = False
+              ) -> list[tuple[float, float, list[str]]]:
+    """Subtitle events on the reel timeline. With karaoke, a cue is split at every word start and the spoken
+    prefix of the original-language line is marked with \x01 (drawn in the highlight colour)."""
     out, off = [], 0.0
-    for a, b, *_ in pieces:
+
+    def lines_for(c, src):
+        tr = c.get("tr", "").replace("⏎", " ").strip()
+        return ([tr, src] if tr_first else [src, tr]) if tr else [src]
+
+    def push(a, b, lines):
+        if b - a < 0.02:
+            return
+        if out and out[-1][2] == lines and abs(out[-1][1] - a) < 0.05:
+            out[-1] = (out[-1][0], b, lines)
+        else:
+            out.append((a, b, lines))
+
+    for pa, pb, *_ in pieces:
         for c in cues:
-            s, e = max(c["start"], a), min(c["end"], b)
-            if e - s > 0.12:
-                lines = [c.get("tr", "").replace("⏎", " "), c["text"]] if c.get("tr") else [c["text"]]
-                if out and out[-1][2] == lines and abs(out[-1][1] - (off + s - a)) < 0.05:
-                    out[-1] = (out[-1][0], off + e - a, lines)
-                else:
-                    out.append((off + s - a, off + e - a, lines))
-        off += b - a
+            s, e = max(c["start"], pa), min(c["end"], pb)
+            if e - s <= 0.12:
+                continue
+            ws = c.get("words") or []
+            if not karaoke or not ws:
+                push(off + s - pa, off + e - pa, lines_for(c, c["text"]))
+                continue
+            full = join_tokens([w["t"] for w in ws])
+            marks = [s] + [w["s"] for w in ws if s < w["s"] < e] + [e]
+            for k in range(len(marks) - 1):
+                spoken = [w for w in ws if w["s"] <= marks[k] + 1e-6]
+                prefix = join_tokens([w["t"] for w in spoken]) if spoken else ""
+                src = prefix + "\x01" + full[len(prefix):] if prefix else full
+                push(off + marks[k] - pa, off + marks[k + 1] - pa, lines_for(c, src))
+        off += pb - pa
     for i in range(len(out) - 1):  # close tiny gaps so subtitles don't flicker
         if 0 < out[i + 1][0] - out[i][1] < 0.3:
             out[i] = (out[i][0], out[i + 1][0], out[i][2])
@@ -263,7 +286,8 @@ def render_highlight(p: Project, hid: str):
 
     # overlay images
     items = [{"out": str(work / "blank.png"), "kind": "blank", "lines": []}]
-    subs = reel_subs(pieces, cues)
+    subs = reel_subs(pieces, cues, p.options.get("sub_order", "tr-first") != "src-first",
+                     bool(p.options.get("karaoke")))
     sub_ev, card_ev, tag_ev = [], [], []
     for i, (a, b, lines) in enumerate(subs):
         f = str(work / f"sub_{i:04d}.png")
@@ -339,8 +363,15 @@ def render_highlight(p: Project, hid: str):
 
 
 def reel_srt(subs) -> str:
+    plain = []  # karaoke steps collapse back to one cue each in the SRT
+    for a, b, lines in subs:
+        lines = [l.replace("\x01", "") for l in lines]
+        if plain and plain[-1][2] == lines and abs(plain[-1][1] - a) < 0.05:
+            plain[-1] = (plain[-1][0], b, lines)
+        else:
+            plain.append((a, b, lines))
     return "\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n" + "\n".join(lines) + "\n" for i, (a, b, lines) in
-                     enumerate(subs, 1))
+                     enumerate(plain, 1))
 
 
 _HW = None

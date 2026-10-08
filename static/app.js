@@ -22,8 +22,8 @@ const OPT_FIELDS = [
   ["ref_model", "參考稿模型（看影片）", "text"], ["text_model", "校正／翻譯模型", "text"],
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
   ["max_chars", "每條最多字元（0 = 自動：英 70／中 22）", "number"], ["max_duration", "每條最長秒數", "number"],
-  ["gap_break", "停頓多久強制斷開（秒）", "number"], ["translate", "要翻譯", "bool"],
-  ["target_lang", "目標語言", "text"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
+  ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字高亮（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
+  ["target_lang", "目標語言", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格", "textarea"], ["workers", "並行數", "number"],
 ];
 
 const S = { defaults: null, locales: [], projects: [], cur: null, cues: [], dirty: false, active: -1, poll: null, stopAt: null };
@@ -86,7 +86,9 @@ async function selectProject(id) {
   $("#projName").textContent = meta.name;
   $("#projMedia").textContent = meta.media;
   const src = `/api/projects/${encodeURIComponent(id)}/media`;
-  if (video.dataset.src !== src) { video.src = src; video.dataset.src = src; }
+  S.reel = null; $("#reelBanner").hidden = true;
+  if (video.dataset.src !== src || !video.src.includes("/media")) { video.src = src; video.dataset.src = src; }
+  $("#karaoke").checked = !!({ ...S.defaults.options, ...(meta.options || {}) }).karaoke;
   renderStages();
   renderOpts();
   renderStatus(meta);
@@ -189,6 +191,7 @@ function renderOpts() {
     const v = o[k];
     if (type === "bool") return `<label class="row gap"><input type="checkbox" name="${k}" ${v ? "checked" : ""}> ${label}</label>`;
     if (type === "textarea") return `<label><span>${label}</span><textarea name="${k}" rows="2">${esc(v)}</textarea></label>`;
+    if (type.startsWith("select:")) return `<label><span>${label}</span><select name="${k}">${type.slice(7).split("|").map((o) => { const [val, txt] = o.split("="); return `<option value="${val}" ${val === v ? "selected" : ""}>${txt}</option>`; }).join("")}</select></label>`;
     if (type === "locale") return `<label><span>${label}</span><select name="${k}">${S.locales.map((l) => `<option ${l === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
     return `<label><span>${label}</span><input name="${k}" type="${type}" step="any" value="${esc(v)}" class="${type === "text" ? "mono" : ""}"></label>`;
   }).join("");
@@ -347,10 +350,19 @@ function applyFilter() {
   });
 }
 $("#search").addEventListener("input", applyFilter);
+$("#karaoke").addEventListener("change", async (e) => {  // shared with the highlight render
+  if (!S.cur) return;
+  S.cur.options = { ...(S.cur.options || {}), karaoke: e.target.checked };
+  await api(pidURL() + "/options", { method: "POST", body: { karaoke: e.target.checked } }).catch(() => {});
+  renderOpts();
+});
 $("#onlyChanged").addEventListener("change", applyFilter);
 
 // ───────── playback sync
-function seek(t) { video.currentTime = Math.max(0, t); }
+function seek(t) {
+  if (S.reel) { exitReel(); video.addEventListener("loadedmetadata", () => { video.currentTime = Math.max(0, t); }, { once: true }); return; }
+  video.currentTime = Math.max(0, t);
+}
 function findCue(t) {
   let lo = 0, hi = S.cues.length - 1, ans = -1;
   while (lo <= hi) {
@@ -376,22 +388,59 @@ function tick() {
       if ($("#follow").checked && !video.paused && !editing) tr.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }
-  const showOv = $("#showOverlay").checked;
+  const showOv = $("#showOverlay").checked && !S.reel;
   $("#overlay").hidden = !showOv;
   if (showOv) {
     const c = S.cues[i];
-    let src = "", tr = "";
+    let a = "", b = "";
     if (c) {
-      tr = esc(c.tr || "").replace(/⏎/g, "<br>");
-      src = $("#karaoke").checked && c.words?.length
+      const src = $("#karaoke").checked && c.words?.length
         ? joinHTML(c.words.map((w) => `<span class="w${t >= w.s ? " on" : ""}">${esc(w.t)}</span>`), c.words)
         : esc(c.text);
+      const tr = esc((c.tr || "").replace(/⏎/g, " "));
+      const trFirst = (S.cur?.options?.sub_order || S.defaults.options.sub_order) !== "src-first";
+      [a, b] = !tr ? [src, ""] : trFirst ? [tr, src] : [src, tr];
     }
-    const key = src + "|" + tr;
-    if (key !== lastOv) { $("#ovSrc").innerHTML = src; $("#ovTr").innerHTML = tr; lastOv = key; }
+    const key = a + "|" + b;
+    if (key !== lastOv) { $("#ovA").innerHTML = a; $("#ovB").innerHTML = b; lastOv = key; }
   }
   requestAnimationFrame(tick);
 }
+// place the overlay over the actual picture (letterboxing aside) and scale it like the 1080p burn-in
+function layoutOverlay() {
+  const vw = video.videoWidth, vh = video.videoHeight, bw = video.clientWidth, bh = video.clientHeight;
+  if (!vw || !vh || !bw) return;
+  const k = Math.min(bw / vw, bh / vh), dw = vw * k, dh = vh * k, u = dh / 1080;
+  const ov = $("#overlay");
+  ov.style.setProperty("--u", u);
+  ov.style.left = (bw - dw) / 2 + dw * 0.07 + "px";
+  ov.style.width = dw * 0.86 + "px";
+  ov.style.bottom = (bh - dh) / 2 + 46 * u + "px";
+}
+video.addEventListener("loadedmetadata", layoutOverlay);
+new ResizeObserver(layoutOverlay).observe(video);
+
+// play a finished reel in the main player; "回到原片" restores the source video and position
+function playReel(url) {
+  if (!S.reel) S.reel = { back: video.currentTime };
+  S.seq = null;
+  video.src = url;
+  $("#reelBanner").hidden = false;
+  $("#overlay").hidden = true;  // the reel already has burned-in subtitles
+  video.play().catch(() => {});
+}
+function exitReel() {
+  if (!S.reel) return;
+  const back = S.reel.back;
+  S.reel = null;
+  video.src = video.dataset.src;
+  const restore = () => { video.currentTime = back; };
+  if (video.readyState >= 1) restore(); else video.addEventListener("loadedmetadata", restore, { once: true });
+  $("#reelBanner").hidden = true;
+  $("#overlay").hidden = !$("#showOverlay").checked;
+}
+$("#reelBack").onclick = exitReel;
+
 function joinHTML(spans, words) {
   const cjk = /[㐀-鿿぀-ヿ가-힯]/;
   return spans.reduce((s, h, k) => {
@@ -571,9 +620,9 @@ function renderPlan() {
         <input data-ci="${ci}" data-f="title_en" value="${esc(ch.title_en || "")}" placeholder="English title">
         <button data-ci="${ci}" data-a="delch" title="刪除整章">✕ 章</button></div>
         ${ch.clips.map((c, k) => clipRow(c, ci, k)).join("")}</div>`).join("")}
-    <div class="hl-out">${r ? `<p>已輸出 ${r.duration} 秒：<a class="btn" href="${pidURL()}/highlights/${pl.id}/download">下載 MP4</a>
-        <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載字幕 SRT</a></p>
-        <video controls preload="metadata" src="${pidURL()}/highlights/${pl.id}/video?ts=${r.at}"></video>` : `<p class="muted small">尚未輸出影片。</p>`}</div>`;
+    <div class="hl-out">${r ? `<p>已輸出 ${r.duration} 秒：<button id="plWatch" class="primary">▶ 在上方播放成品</button>
+        <a class="btn" href="${pidURL()}/highlights/${pl.id}/download">下載 MP4</a>
+        <a class="btn" href="${pidURL()}/highlights/${pl.id}/srt">下載字幕 SRT</a></p>` : `<p class="muted small">尚未輸出影片。</p>`}</div>`;
 }
 const clipsOf = (ci) => ci < 0 ? S.plan.hook : S.plan.chapters[ci].clips;
 function planChanged() {
@@ -594,6 +643,7 @@ $("#hlEdit").addEventListener("change", (e) => {
 $("#hlEdit").addEventListener("click", async (e) => {
   const a = e.target.dataset.a, id = e.target.id;
   if (id === "plPreview") return playSeq();
+  if (id === "plWatch") return playReel(`${pidURL()}/highlights/${S.plan.id}/video?ts=${S.plan.rendered.at}`);
   if (id === "plSave") return savePlan();
   if (id === "plRender") {
     if (!needIdle()) return;
@@ -617,6 +667,7 @@ async function savePlan() {
   renderPlan(); loadPlans();
 }
 function playSeq() {
+  exitReel();
   const pl = S.plan, pieces = [];
   (pl.hook || []).forEach((c, k) => pieces.push({ ...c, ci: -1, k }));
   pl.chapters.forEach((ch, ci) => ch.clips.forEach((c, k) => pieces.push({ ...c, ci, k, title: k === 0 ? ch.title : "" })));
