@@ -59,7 +59,7 @@ DEFAULT_OPTIONS = {
 # with spaces, so it is tokenised like Latin (splitting it per syllable would drop the spaces between words).
 CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
 HANGUL = "\uac00-\ud7af\u1100-\u11ff\u3130-\u318f"
-CJK_PUNCT = "，。、！？；：「」『』（）《》〈〉…—～·"
+CJK_PUNCT = "，。、！？；：「」『』（）《》〈〉…—～〜·"
 _tok_re = re.compile(rf"[{CJK}]|[^\s{CJK}{re.escape(CJK_PUNCT)}]+|[{re.escape(CJK_PUNCT)}]")
 
 
@@ -86,18 +86,28 @@ def norm(t: str) -> str:
                    if c.isalnum() or unicodedata.category(c).startswith("M"))
 
 
-NOSPACE_PUNCT = "，。、！？；：「」『』（）《》〈〉～·"
+NOSPACE_PUNCT = "，。、！？；：「」『』（）《》〈〉～〜·"
+_KANA = re.compile("[\u3040-\u30ff]")
 
 
 def join_tokens(tokens: list[str]) -> str:
-    """Spaces between Latin words and between Latin/CJK (Taiwan style: 叫 InterPositive 的), none inside CJK."""
+    """Spaces between Latin words and between Latin/CJK (Taiwan style: 叫 InterPositive 的), none inside CJK.
+    Japanese (any kana) writes Latin / digits straight against kana and kanji: ホロライブ3期生、VTuberの."""
     s = ""
+    ja = any(_KANA.search(t) for t in tokens)
     for t in tokens:
         if s and not (s[-1] in NOSPACE_PUNCT or t[0] in NOSPACE_PUNCT
-                      or (is_cjk_char(s[-1]) and is_cjk_char(t[0]))):
+                      or (is_cjk_char(s[-1]) and is_cjk_char(t[0]))
+                      or (ja and (is_cjk_char(s[-1]) or is_cjk_char(t[0])))):
             s += " "
         s += t
     return s
+
+
+def ja_unspace(text: str) -> str:
+    """Japanese writes digits / Latin straight against kana and kanji (38万、VTuberの) — undo the Chinese-style
+    spacing join_tokens adds on lines that happen to have no kana."""
+    return re.sub(rf"(?<=[{CJK}]) (?=[0-9A-Za-z])|(?<=[0-9A-Za-z]) (?=[{CJK}])", "", text)
 
 
 def is_cjk_text(text: str) -> bool:
@@ -1404,6 +1414,9 @@ def stage_cues(p: Project):
     else:
         groups = heuristic_groups(words, o)
     cues = finalize_cues(groups)
+    if str(o.get("locale", "")).lower().startswith("ja") or (p.read("languages.json") or {}).get("primary") == "ja":
+        for c in cues:
+            c["text"] = ja_unspace(c["text"])
     # keep the raw ASR text per cue for the "what changed" view
     asr_words = [(u["s"], u["t"]) for seg in asr["segments"] for u in asr_units(seg)]
     for c in cues:
@@ -1474,6 +1487,43 @@ def echo_ok(echo: str, text: str) -> bool:
     return src.startswith(e[:k]) or e[:k] in src[:k + 6]
 
 
+NAMES_SCHEMA = {"type": "object", "properties": {"names": {"type": "array", "items": {"type": "object", "properties": {
+    "src": {"type": "string"}, "tr": {"type": "string"}}, "required": ["src", "tr"]}}}, "required": ["names"]}
+
+
+def name_sheet(p: Project, o: dict, cues: list[dict], ref: dict) -> list[dict]:
+    """One fixed rendering per name / term, decided once before the parallel batches translate — otherwise
+    each batch picks its own (Diana 醬 / 戴安娜醬). Cached per target language."""
+    speakers, terms = ref.get("speakers") or {}, ref.get("terms") or []
+    if not speakers and not terms and not o["glossary"].strip():
+        return []
+    cached = p.read("names.json") or {}
+    if cached.get("target") == o["target_lang"] and cached.get("terms") == terms:
+        return cached["names"]
+    sample = "\n".join(c["text"] for c in cues)[:6000]
+    system = (f"Subtitles of this video are about to be translated into {o['target_lang']} ({style_for(o)}). "
+              "Decide ONE fixed rendering for every person / character name, show, brand and recurring term "
+              "listed below, so every subtitle uses the same form. Use the established official or fan-standard "
+              f"form in {o['target_lang']} when there is one; keep a name in its original / Latin form when "
+              "that is how viewers usually write it. Include the name variants that appear in the transcript "
+              "(e.g. a nickname or the name in kana) as separate entries mapped to a consistent form. Also add the "
+              "speaker's recurring catchphrases and verbal tics (e.g. a signature sentence-final word) with the "
+              "one way they should appear in every subtitle.")
+    src = (f"Speakers: {json.dumps(speakers, ensure_ascii=False)}\nTerms: {json.dumps(terms, ensure_ascii=False)}"
+           + (f"\nGlossary: {o['glossary'].strip()}" if o["glossary"].strip() else "")
+           + f"\nTranscript excerpt:\n{sample}")
+    try:
+        data, _ = gemini.generate_json(o["text_model"], [{"text": src}], system=system, schema=NAMES_SCHEMA,
+                                       usage=p.usage, log=p.log)
+        names = [n for n in data.get("names", []) if n.get("src") and n.get("tr")]
+    except Exception as e:
+        p.log(f"  名稱對照表失敗，略過：{e}")
+        return []
+    p.write("names.json", {"target": o["target_lang"], "terms": terms, "names": names})
+    p.log(f"  名稱對照表：{len(names)} 個（" + "、".join(f"{n['src']}→{n['tr']}" for n in names[:6]) + "…）")
+    return names
+
+
 def stage_translate(p: Project, only_missing: bool = False):
     o = resolve_target(p)
     p.log(f"  翻成：{o['target_lang']}")
@@ -1481,6 +1531,7 @@ def stage_translate(p: Project, only_missing: bool = False):
     cues = doc["cues"]
     ref = p.read("reference.json") or {}
     glossary = o["glossary"].strip()
+    names = name_sheet(p, o, cues, ref)
     system = (
         f"You translate subtitles into {o['target_lang']}. Style: {style_for(o)}.\n"
         "Cues come grouped by SENTENCE. For each sentence: first understand / translate the whole sentence, then "
@@ -1499,6 +1550,8 @@ def stage_translate(p: Project, only_missing: bool = False):
         "target language, keeping brand / product names as usually written. Return every id."
         + (f"\n{languages_note(p)}." if languages_note(p) else "")
         + (f"\nGlossary / names: {glossary}" if glossary else "")
+        + ("\nNames and terms — always write them EXACTLY like this, in every cue: "
+           + "; ".join(f"{n['src']} → {n['tr']}" for n in names) if names else "")
         + (f"\nSpeakers: {json.dumps(ref.get('speakers', {}), ensure_ascii=False)}" if ref.get("speakers") else "")
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )

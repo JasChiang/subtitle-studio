@@ -22,6 +22,13 @@ class Tokenize(unittest.TestCase):
     def test_japanese_is_per_character_without_spaces(self):
         self.assertEqual(self.roundtrip("今日はいい天気ですね。"), "今日はいい天気ですね。")
 
+    def test_japanese_no_space_around_digits_latin_or_wave_dash(self):
+        self.assertEqual(self.roundtrip("ホロライブ3期生の、兎田ぺこ〜らぺこ〜！"), "ホロライブ3期生の、兎田ぺこ〜らぺこ〜！")
+        self.assertEqual(self.roundtrip("VTuberのディアナちゃんで〜す"), "VTuberのディアナちゃんで〜す")
+        self.assertEqual(self.roundtrip("Usada Pekoraです"), "Usada Pekoraです")
+        self.assertEqual(pl.ja_unspace("38 万！？"), "38万！？")
+        self.assertEqual(pl.ja_unspace("- AI すごい\n- Usada Pekora"), "- AIすごい\n- Usada Pekora")
+
     def test_korean_keeps_spaces_between_words(self):
         self.assertEqual(self.roundtrip("안녕하세요 저는 개발자입니다."), "안녕하세요 저는 개발자입니다.")
         self.assertEqual(pl.tokenize("저는 개발자"), ["저는", "개발자"])
