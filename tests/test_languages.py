@@ -34,6 +34,18 @@ class Targets(unittest.TestCase):
         self.assertEqual(pl.auto_target(""), "繁體中文（台灣）")
 
 
+class SameLanguage(unittest.TestCase):
+    def test_code_switched_lines_are_never_already_english(self):
+        self.assertTrue(pl.can_be_same("That's really useful.", "English"))
+        self.assertFalse(pl.can_be_same("這個 feature 真的很 useful", "English"))
+        self.assertFalse(pl.can_be_same("我們用 Gemini", "English"))
+
+    def test_chinese_target(self):
+        self.assertTrue(pl.can_be_same("用 Gemini 做影片理解", "繁體中文（台灣）"))
+        self.assertFalse(pl.can_be_same("Thanks for having me.", "繁體中文（台灣）"))
+        self.assertFalse(pl.can_be_same("오늘은 자막 도구", "繁體中文（台灣）"))
+
+
 class OtherLanguageSpans(unittest.TestCase):
     # ASR words every 0.4 s (0.3 s long) with gaps at 5.1–5.3 and 10.0–10.4
     words = [{"s": t / 10, "e": t / 10 + 0.3} for t in list(range(0, 50, 4)) + list(range(53, 100, 4)) +

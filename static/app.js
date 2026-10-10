@@ -163,6 +163,7 @@ function startPolling() {
 $("#runBtn").onclick = async () => {
   const stages = $$("#stageList input:checked").map((i) => i.value);
   if (!stages.length) return;
+  if (S.optsDirty) await saveSettings();  // run with what the settings tab shows
   if (S.dirty) {
     if (stages.some((s) => s !== "translate") && !window.confirm("重跑會覆蓋你在表格裡的未存檔修改，繼續？")) return;
     if (stages.every((s) => s === "translate")) await saveCues();
@@ -195,6 +196,7 @@ $$(".panel-tabs button").forEach((b) => b.onclick = () => {
 });
 
 function renderOpts() {
+  setTimeout(() => setOptsDirty(false));
   const o = { ...S.defaults.options, ...(S.cur.options || {}) };
   $("#optsForm").innerHTML = OPT_FIELDS.map(([k, label, type]) => {
     const v = o[k];
@@ -206,7 +208,15 @@ function renderOpts() {
     return `<label><span>${label}</span><input name="${k}" type="${type}" step="any" value="${esc(v)}" class="${type === "text" ? "mono" : ""}"></label>`;
   }).join("");
 }
-$("#saveOpts").onclick = async () => {
+// settings are saved explicitly — and automatically before a run, so a changed-but-unsaved value is never ignored
+$("#optsForm").addEventListener("input", () => setOptsDirty(true));
+$("#optsForm").addEventListener("change", () => setOptsDirty(true));
+function setOptsDirty(v) {
+  S.optsDirty = v;
+  $("#optsDirty").hidden = !v;
+}
+$("#saveOpts").onclick = () => saveSettings();
+async function saveSettings() {
   const out = {};
   for (const [k, , type] of OPT_FIELDS) {
     const el = $(`#optsForm [name="${k}"]`);
@@ -214,10 +224,11 @@ $("#saveOpts").onclick = async () => {
   }
   await api(`/api/projects/${encodeURIComponent(S.cur.id)}/options`, { method: "POST", body: out });
   S.cur.options = out;
+  setOptsDirty(false);
   renderStages();
   $("#saveOpts").textContent = "已儲存 ✓";
   setTimeout(() => $("#saveOpts").textContent = "儲存設定", 1200);
-};
+}
 
 async function loadRef() {
   const r = await api(`/api/projects/${encodeURIComponent(S.cur.id)}/reference`).catch(() => ({}));

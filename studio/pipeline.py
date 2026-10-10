@@ -1432,6 +1432,23 @@ TR_SCHEMA = {
 TR_END = (".", "?", "!", "。", "？", "！", "…", '."', '?"', '!"', "」")
 
 
+def can_be_same(text: str, target: str) -> bool:
+    """Could this cue already be in the target language? A script check the model's `same` must pass: for an
+    English target a line with any Chinese / Japanese / Korean in it still needs translating (code-switching),
+    for a Chinese target a line without Chinese characters does."""
+    t = (target or "").lower()
+    han = bool(re.search("[\u3400-\u9fff]", text))
+    kana = bool(re.search("[\u3040-\u30ff]", text))
+    hangul = bool(re.search(f"[{HANGUL}]", text))
+    if is_chinese(t):
+        return han and not kana and not hangul
+    if any(w in t for w in ("日本", "japan")) or t.startswith("ja"):
+        return kana or han
+    if any(w in t for w in ("韓", "한국", "korean")) or t.startswith("ko"):
+        return hangul
+    return not (han or kana or hangul)  # Latin-script targets (English, Español, …)
+
+
 def sentence_groups(cues: list[dict], idxs: list[int]) -> list[list[int]]:
     """Consecutive cue indices that together form one sentence (cues are often half sentences)."""
     groups, cur = [], []
@@ -1458,6 +1475,7 @@ def echo_ok(echo: str, text: str) -> bool:
 
 def stage_translate(p: Project, only_missing: bool = False):
     o = resolve_target(p)
+    p.log(f"  翻成：{o['target_lang']}")
     doc = p.read("cues.json")
     cues = doc["cues"]
     ref = p.read("reference.json") or {}
@@ -1475,8 +1493,9 @@ def stage_translate(p: Project, only_missing: bool = False):
         "at once: translate it as '－第一人的話　－第二人的話' on ONE line. For every cue also return `echo` = the "
         "first 3 words (or first 4 characters) of that cue's own source text, copied exactly — it is used to "
         "check that each translation is attached to the right cue. If a cue is ALREADY entirely in the target "
-        "language, set `same` = true and `tr` = '' (it is shown as a single line); a cue mixing languages is "
-        "still translated. Return every id."
+        "language, set `same` = true and `tr` = '' (it is shown as a single line). A cue MIXING languages "
+        "(code-switching, e.g. Chinese with English words) is NOT the same: translate the whole cue into the "
+        "target language, keeping brand / product names as usually written. Return every id."
         + (f"\n{languages_note(p)}." if languages_note(p) else "")
         + (f"\nGlossary / names: {glossary}" if glossary else "")
         + (f"\nSpeakers: {json.dumps(ref.get('speakers', {}), ensure_ascii=False)}" if ref.get("speakers") else "")
@@ -1519,6 +1538,9 @@ def stage_translate(p: Project, only_missing: bool = False):
                 i = by_id.get(it.get("id"))
                 same = bool(it.get("same"))
                 if i is None or (not it.get("tr", "").strip() and not same):
+                    continue
+                if same and not can_be_same(cues[i]["text"], o["target_lang"]):
+                    bad += 1  # e.g. a code-switched line marked "already English" — translate it again
                     continue
                 if echo_ok(it.get("echo", ""), cues[i]["text"]):
                     good.setdefault(i, None if same else it["tr"].strip())
