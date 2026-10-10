@@ -10,6 +10,7 @@ const api = async (path, opts = {}) => {
 };
 
 const STAGE_INFO = {
+  proxy: ["預覽代理檔", "原片太大或瀏覽器播不了時，做一份 720p 預覽用的檔案（輸出仍用原片）"],
   asr: ["Apple ASR", "裝置端轉錄，取得每個字的時間碼"],
   reference: ["Gemini 參考稿", "分段上傳低解析影片，獨立聽寫＋認講者／專有名詞"],
   correct: ["校正", "用參考稿修正 ASR 文字（不動時間碼）"],
@@ -23,7 +24,7 @@ const OPT_FIELDS = [
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
   ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["cjk_spacing", "中文與英文／數字之間加半形空格", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
-  ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
+  ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["proxy", "預覽代理檔", "select:auto=需要時才做（原片太大或瀏覽器播不了）|always=一律使用|never=不使用，直接播放原片"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
   ["target_lang", "目標語言（例：繁體中文（台灣）、简体中文、日本語、English）", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
 ];

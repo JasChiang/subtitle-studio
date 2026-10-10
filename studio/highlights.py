@@ -220,7 +220,7 @@ def lowres_concat(p: Project, pieces: list[tuple[float, float]], out: Path, has_
     """Concatenate source ranges into one small 360p reel for Gemini to watch. Returns the MIME type."""
     args, fc, cat = [], "", ""
     for i, (a, b) in enumerate(pieces):
-        args += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media)]
+        args += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.ai_media)]
         if has_video:
             fc += f"[{i}:v]setpts=PTS-STARTPTS,scale=-2:360,fps=10,format=yuv420p,setsar=1[v{i}];"
         fc += (f"[{i}:a]asetpts=PTS-STARTPTS,aresample=44100,afade=t=in:d=0.03,"

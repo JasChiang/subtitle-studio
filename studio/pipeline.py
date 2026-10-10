@@ -21,7 +21,7 @@ from . import gemini
 ROOT = Path(__file__).resolve().parent.parent
 ASR_BIN = ROOT / "bin" / "apple-asr"
 
-STAGES = ["asr", "reference", "correct", "cues", "translate"]
+STAGES = ["proxy", "asr", "reference", "correct", "cues", "translate"]
 
 DEFAULT_OPTIONS = {
     "locale": "auto",              # auto = Gemini listens to a few excerpts and picks the Apple ASR language
@@ -41,6 +41,7 @@ DEFAULT_OPTIONS = {
     "max_chars": 0,                # 0 = auto by script: Latin 42, Chinese / Japanese 16, Korean 20 per line
     "sub_scale": 100,              # subtitle font size, % of the default (preview and export alike)
     "loudnorm": True,              # exports: normalise loudness to -14 LUFS (YouTube's reference)
+    "proxy": "auto",               # editing proxy for preview: auto (only when needed) | always | never
     "max_duration": 6.5,
     "gap_break": 0.7,
     "translate": True,
@@ -220,6 +221,13 @@ class Project:
     def media(self) -> Path:
         return Path(self.meta["media"])
 
+    @property
+    def ai_media(self) -> Path:
+        """What Gemini watches / listens to: the small editing proxy when there is one (Gemini only needs 360p
+        anyway, and cutting excerpts from a 4K ProRes original is slow). Exports and Apple ASR use the original."""
+        proxy = self.dir / "proxy.mp4"
+        return proxy if self.meta.get("proxy") and proxy.exists() else self.media
+
 
 def run_stages(p: Project, stages: list[str]):
     m = p.meta
@@ -243,6 +251,78 @@ def run_stages(p: Project, stages: list[str]):
         p.log(f"✗ {type(e).__name__}: {e}")
         p.status(state="error", error=str(e))
         raise
+
+
+# ───────────────────────────── proxy (preview / editing) ─────────────────────────────
+
+def probe_media(path: Path) -> dict:
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                          "format=format_name,bit_rate,size,duration:stream=codec_type,codec_name,width,height,pix_fmt,"
+                          "avg_frame_rate", "-of", "json", str(path)], capture_output=True, text=True, check=True)
+    d = json.loads(out.stdout)
+    v = next((x for x in d.get("streams", []) if x.get("codec_type") == "video"), {})
+    f = d.get("format", {})
+    return {"container": f.get("format_name", ""), "ext": path.suffix.lower(), "bit_rate": int(f.get("bit_rate") or 0),
+            "size": int(f.get("size") or 0), "duration": float(f.get("duration") or 0), "has_video": bool(v),
+            "codec": v.get("codec_name", ""), "width": int(v.get("width") or 0), "height": int(v.get("height") or 0),
+            "pix_fmt": v.get("pix_fmt", ""), "fps": v.get("avg_frame_rate", "")}
+
+
+def needs_proxy(info: dict, mode: str = "auto") -> str | None:
+    """Why the browser preview should use a proxy instead of the original — or None if it shouldn't."""
+    if mode == "never" or not info.get("has_video"):
+        return None
+    if mode == "always":
+        return "設定為一律使用代理檔"
+    if info["codec"] not in ("h264", "vp9", "av1"):
+        return f"瀏覽器不一定能播放 {info['codec'] or '這種'} 編碼"
+    if "10" in info.get("pix_fmt", "") or "12" in info.get("pix_fmt", ""):
+        return f"{info['pix_fmt']}（高位元深度）瀏覽器播放吃力"
+    # ffprobe names MKV and WebM alike ("matroska,webm"), so tell them apart by extension
+    if "matroska" in info["container"] and info.get("ext") != ".webm":
+        return "MKV 容器瀏覽器不一定能播放"
+    if not any(c in info["container"] for c in ("mp4", "mov", "matroska")):
+        return f"{info['container']} 容器瀏覽器不一定能播放"
+    if info["height"] > 1080:
+        return f"{info['width']}×{info['height']} 解析度太高，預覽會卡"
+    if info["bit_rate"] > 20_000_000:
+        return f"碼率 {info['bit_rate'] / 1e6:.0f} Mbps 太高，預覽會卡"
+    return None
+
+
+def stage_proxy(p: Project):
+    """A 720p H.264 copy for smooth preview / seeking (keyframe every second). Export still uses the original."""
+    info = probe_media(p.media)
+    why = needs_proxy(info, p.options.get("proxy", "auto"))
+    out = p.dir / "proxy.mp4"
+    if not why:
+        out.unlink(missing_ok=True)
+        p.update(proxy=None)
+        p.log(f"  原片可以直接預覽（{info['codec']} {info['width']}×{info['height']}，"
+              f"{info['bit_rate'] / 1e6:.1f} Mbps），不需要代理檔")
+        return
+    if out.exists() and p.meta.get("proxy") == "proxy.mp4":
+        p.log("  已有代理檔，沿用")
+        return
+    p.log(f"  建立預覽用代理檔：{why}")
+    hw = "h264_videotoolbox" in subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True,
+                                               text=True).stdout
+    enc = ["-c:v", "h264_videotoolbox", "-b:v", "3M"] if hw else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+    tmp = out.with_suffix(".part.mp4")
+    proc = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(p.media),
+                             "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(720,ih)'", *enc,
+                             "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)", "-fps_mode", "passthrough",
+                             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+                             str(tmp)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for line in proc.stdout:
+        if line.startswith("out_time_us=") and line.strip().split("=")[1].isdigit() and info["duration"]:
+            p.status(progress=min(0.99, int(line.split("=")[1]) / 1e6 / info["duration"]))
+    err = proc.stderr.read()
+    if proc.wait() != 0:
+        raise RuntimeError("代理檔建立失敗：" + err[-400:])
+    tmp.replace(out)
+    p.update(proxy="proxy.mp4")
+    p.log(f"  代理檔完成：{out.stat().st_size / 1e6:.0f} MB（原片 {info['size'] / 1e6:.0f} MB）")
 
 
 # ───────────────────────────── 0. languages ─────────────────────────────
@@ -311,7 +391,7 @@ def detect_languages(p: Project) -> dict:
     clip = p.dir / "lang_sample.m4a"
     args, fc = [], ""
     for i, (a, d) in enumerate(picks):
-        args += ["-ss", f"{a:.2f}", "-t", f"{min(d, dur - a):.2f}", "-i", str(p.media)]
+        args += ["-ss", f"{a:.2f}", "-t", f"{min(d, dur - a):.2f}", "-i", str(p.ai_media)]
         fc += f"[{i}:a]"
     subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", f"{fc}concat=n={len(picks)}:v=0:a=1[a]",
                     "-map", "[a]", "-ac", "1", "-c:a", "aac", "-b:a", "48k", str(clip)], check=True)
@@ -495,7 +575,7 @@ def make_proxy(p: Project, a: float, b: float, out: Path, has_video: bool) -> st
     """Low-res (360p / 2 fps) excerpt for Gemini video understanding. Returns the MIME type."""
     vf = ["-vf", "scale=-2:360,fps=2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32"] if has_video \
         else ["-vn"]
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.media),
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(p.ai_media),
                     *vf, "-c:a", "aac", "-b:a", "64k", "-ac", "1", str(out)], check=True)
     return "video/mp4" if has_video else "audio/mp4"
 
@@ -734,7 +814,7 @@ def stage_correct(p: Project):
             a0 = max(0.0, a)
             clip = p.dir / "reference" / f"audio_{k:03d}.m4a"
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a0:.3f}", "-t", f"{b - a0:.3f}", "-i",
-                            str(p.media), "-vn", "-c:a", "aac", "-b:a", "48k", "-ac", "1", str(clip)], check=True)
+                            str(p.ai_media), "-vn", "-c:a", "aac", "-b:a", "48k", "-ac", "1", str(clip)], check=True)
             upl = gemini.upload_file(clip, "audio/mp4", log=p.log)
             clip.unlink(missing_ok=True)
             parts = [{"file_data": {"mime_type": "audio/mp4", "file_uri": upl["uri"]}},
@@ -1466,7 +1546,7 @@ def stage_translate(p: Project, only_missing: bool = False):
           + (f"（{missing} 條缺譯，可按「補翻缺少的譯文」）" if missing else ""))
 
 
-STAGE_FN = {"asr": stage_asr, "reference": stage_reference, "correct": stage_correct, "cues": stage_cues,
+STAGE_FN = {"proxy": stage_proxy, "asr": stage_asr, "reference": stage_reference, "correct": stage_correct, "cues": stage_cues,
             "translate": stage_translate}
 
 

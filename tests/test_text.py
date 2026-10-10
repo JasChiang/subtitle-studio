@@ -98,3 +98,25 @@ class TranslationChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Proxy(unittest.TestCase):
+    base = {"has_video": True, "codec": "h264", "pix_fmt": "yuv420p", "container": "mov,mp4,m4a,3gp,3g2,mj2",
+            "width": 1920, "height": 1080, "bit_rate": 1_300_000}
+
+    def test_browser_friendly_1080p_h264_needs_none(self):
+        self.assertIsNone(pl.needs_proxy(self.base))
+
+    def test_reasons(self):
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "codec": "prores"}))
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "width": 3840, "height": 2160}))
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "bit_rate": 60_000_000}))
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "pix_fmt": "yuv420p10le"}))
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "container": "matroska,webm", "ext": ".mkv"}))
+        self.assertIsNone(pl.needs_proxy({**self.base, "container": "matroska,webm", "ext": ".webm", "codec": "vp9"}))
+        self.assertIsNotNone(pl.needs_proxy({**self.base, "container": "avi", "ext": ".avi"}))
+
+    def test_modes(self):
+        self.assertIsNotNone(pl.needs_proxy(self.base, "always"))
+        self.assertIsNone(pl.needs_proxy({**self.base, "codec": "prores"}, "never"))
+        self.assertIsNone(pl.needs_proxy({**self.base, "has_video": False}, "always"))

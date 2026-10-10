@@ -83,6 +83,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 
 | 步驟 | 內容 | 產物（`projects/<id>/`） |
 |---|---|---|
+| **proxy** | 原片是瀏覽器播不了的格式（ProRes、MKV、10-bit）、超過 1080p 或碼率過高時，用 Apple 硬體編碼做一份 720p H.264 代理檔（每秒一個關鍵影格，跳轉快）。網頁預覽與編輯、給 Gemini 的小檔都從代理檔來；**輸出成品和 Apple 語音辨識仍用原片**。一般 1080p H.264 會略過 | `proxy.mp4` |
 | **asr** | ffmpeg 抽 16 kHz 單聲道音軌 → `bin/apple-asr`（SpeechTranscriber，字級時間碼） | `audio.wav`, `asr.json` |
 | **reference** | 依「每段分鐘數」切成 360p／2 fps 的代理檔，用 File API 上傳；Gemini 逐字聽寫，並標出講者與專有名詞（3 段並行） | `reference/chunk_*.json`, `reference.json` |
 | **correct** | 把 ASR 段落和同時段的參考稿一起交給 Gemini（純文字）校正；段落中途換講者時標 `\|\|` | `corrected.json` |
@@ -149,6 +150,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | `drop_fillers` | true | 移除 um／uh／嗯／呃 |
 | `semantic_breaks` / `seg_thinking` | true / low | 語意斷句開關與 Gemini 思考程度（low／medium／high） |
 | `max_chars` / `max_duration` / `gap_break` | 0（自動：英 42、中／日 16、韓 20）/ 6.5 / 0.7 | 每行字數上限（斷句與翻譯都會參考），以及規則斷句的參數 |
+| `proxy` | auto | 預覽代理檔：auto（需要時才做）／always／never |
 | `sub_scale` / `loudnorm` | 100 / true | 字幕字級（%，預覽與輸出相同）；輸出影片時統一音量到 -14 LUFS |
 | `target_lang` / `translate_style` | 繁體中文（台灣）／（自動） | 翻譯目標語言；風格留空時依目標語言自動決定 |
 | `karaoke` / `sub_order` | false / 譯文在上 | 逐字變色、雙語上下順序（預覽與輸出共用） |

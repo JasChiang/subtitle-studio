@@ -287,8 +287,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(doc)
             if sub == "reference":
                 return self.send_json({**(p.read("reference.json") or {}), "languages": p.read("languages.json")})
-            if sub == "media":
-                return self.send_file(p.media)
+            if sub == "media":  # preview / editing: the proxy when there is one; exports always read the original
+                proxy = p.dir / "proxy.mp4"
+                use = proxy if p.meta.get("proxy") and proxy.exists() and p.options.get("proxy") != "never" else p.media
+                return self.send_file(use)
             if sub == "overlay":  # live-preview layer, drawn by the same renderer as the export
                 kind = q.get("kind", ["sub"])[0]
                 if kind not in ("sub", "card", "tag"):
