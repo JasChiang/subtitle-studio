@@ -304,6 +304,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if sub == "energy":  # 10 ms loudness (dBFS, float32 LE) for the editor's waveform
+                if not (p.dir / "audio.wav").exists():
+                    raise KeyError
+                pipeline.load_energy(p)
+                return self.send_file(p.dir / "energy.f32")
             if sub == "size":
                 return self.send_json(highlights.project_size(p))
             if sub == "summary":

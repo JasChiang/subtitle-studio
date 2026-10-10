@@ -262,12 +262,14 @@ async function loadCues() {
   S.cues = d.cues || [];
   S.dirty = false; $("#dirty").hidden = true;
   renderCues();
+  loadEnergy();
 }
 
 function rowHTML(c, i) {
+  let iss;
   const changed = c.asr && normTxt(c.asr) !== normTxt(c.text);
   return `<tr data-i="${i}">
-    <td class="n ${changed ? "chg" : ""}" title="${changed ? "ASR 原文：" + esc(c.asr) : ""}">${i + 1}${c.est ? `<span class="est" title="這句有 ASR 沒聽到、由校正補上的字，時間是估計的，建議對著影片檢查">⏱</span>` : ""}</td>
+    <td class="n ${changed ? "chg" : ""}" title="${changed ? "ASR 原文：" + esc(c.asr) : ""}">${i + 1}${(iss = issues(c, i)).length ? `<span class="est" title="待檢查：${esc(iss.join("；"))}">⚠</span>` : ""}</td>
     <td class="tc"><input value="${fmt(c.start)}" data-f="start"></td>
     <td class="tc"><input value="${fmt(c.end)}" data-f="end"></td>
     <td class="txt"><div contenteditable="plaintext-only" data-f="text">${esc(c.text)}</div>${changed ? `<div class="asr">ASR：${esc(c.asr)}</div>` : ""}</td>
@@ -278,8 +280,10 @@ function renderCues() {
   const tb = $("#cues tbody");
   tb.innerHTML = S.cues.map(rowHTML).join("");
   S.active = -1;
+  if (S.wv) S.wv.i = Math.max(0, Math.min(S.wv.i, S.cues.length - 1));  // after a split / merge / delete
   applyFilter();
   markOverlaps();
+  reviewCount();
 }
 function rerenderRow(i) {
   const tr = $(`#cues tr[data-i="${i}"]`);
@@ -292,6 +296,165 @@ function markOverlaps() {
     tr.classList.toggle("overlap", c.end <= c.start || (n && c.end > n.start + 0.001));
   });
 }
+
+// ───────── review: lines worth a human look + a waveform to fix their timing
+const MAX_CPS = { cjk: 9, latin: 22 };  // reading speed a viewer can still follow (characters / second)
+function issues(c, i) {
+  if (c.reviewed) return [];
+  const out = [], d = c.end - c.start, n = S.cues[i + 1], len = normTxt(c.text).length;
+  if (c.est) out.push("有 ASR 沒聽到的字，時間是估計的");
+  if (d < 0.7) out.push(`只顯示 ${d.toFixed(2)} 秒`);
+  else if (len / d > (CJKRE.test(c.text) ? MAX_CPS.cjk : MAX_CPS.latin)) out.push(`讀速太快（每秒 ${Math.round(len / d)} 字）`);
+  if (n && c.end > n.start + 0.001) out.push("跟下一條重疊");
+  return out;
+}
+const reviewList = () => S.cues.map((c, i) => issues(c, i).length ? i : -1).filter((i) => i >= 0);
+function reviewCount() {
+  const n = reviewList().length;
+  $("#reviewN").textContent = n ? `（${n}）` : "";
+  if (S.wv && S.cues[S.wv.i]) wvInfo();
+  wvShow();
+}
+async function loadEnergy() {
+  const id = S.cur.id;
+  S.energy = null; S.wv = null; wvShow();
+  const r = await fetch(pidURL() + "/energy").catch(() => null);
+  if (!r?.ok || S.cur?.id !== id) return;
+  S.energy = new Float32Array(await r.arrayBuffer());
+  const first = reviewList()[0];
+  wvFocus(first ?? 0);
+}
+function wvShow() { $("#wave").hidden = !(S.energy && S.cues.length && (S.view || "subs") === "subs"); }
+function wvFocus(i, recenter = true) {
+  const c = S.cues[i];
+  if (!c || !S.energy) return;
+  const first = !S.wv;
+  S.wv = { ...(S.wv || {}), i };
+  const { t0, t1 } = S.wv;
+  if (recenter || first || c.start < t0 || c.end > t1) {  // the line plus a few seconds of context either side
+    const pad = Math.max(2, (6 - (c.end - c.start)) / 2);
+    S.wv.t0 = Math.max(0, c.start - pad); S.wv.t1 = c.end + pad;
+  }
+  wvShow(); wvInfo();
+  if ($("#onlyReview").checked) applyFilter();
+}
+function wvInfo() {
+  const i = S.wv.i, c = S.cues[i], iss = issues(c, i), list = reviewList(), k = list.indexOf(i);
+  $("#wvInfo").innerHTML = `<b>#${i + 1}</b>　${fmt(c.start)} → ${fmt(c.end)}（${(c.end - c.start).toFixed(2)} 秒）` +
+    (iss.length ? `　<span class="warn">⚠ ${esc(iss.join("；"))}</span>` : c.reviewed ? "　✓ 已檢查" : "");
+  $("#wvCount").textContent = list.length ? `${k >= 0 ? k + 1 : "–"} / ${list.length}` : "0";
+  $("#wvOk").disabled = !iss.length;
+}
+function wvJump(dir) {  // previous / next line that still needs a look
+  const list = reviewList(), i = S.wv?.i ?? -1;
+  const j = dir > 0 ? list.find((k) => k > i) ?? list[0] : list.findLast((k) => k < i) ?? list.at(-1);
+  if (j == null) return;
+  wvFocus(j);
+  seek(Math.max(0, S.cues[j].start - 0.3));
+  $(`#cues tr[data-i="${j}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function drawWave() {
+  const cv = $("#waveCv"), W = cv.clientWidth, H = cv.clientHeight, dpr = devicePixelRatio || 1;
+  if (!W || !S.wv) return;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d"), { t0, t1, i: fi } = S.wv, x = (t) => (t - t0) / (t1 - t0) * W;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  S.wvColors ||= { accent: css("--accent"), muted: css("--muted"), warn: css("--warn"), ink: css("--ink") };
+  const C = S.wvColors, mid = H / 2 + 6;
+  // lines in view
+  g.font = "11px IBM Plex Sans, PingFang TC, sans-serif"; g.textBaseline = "top";
+  for (let k = Math.max(0, fi - 8); k < Math.min(S.cues.length, fi + 9); k++) {
+    const c = S.cues[k];
+    if (c.end < t0 || c.start > t1) continue;
+    const a = x(c.start), b = x(c.end), on = k === fi;
+    g.fillStyle = on ? "rgba(255,214,10,.16)" : issues(c, k).length ? "rgba(240,122,90,.10)" : "rgba(255,255,255,.05)";
+    g.fillRect(a, 0, b - a, H);
+    g.save(); g.beginPath(); g.rect(a + 3, 0, Math.max(0, b - a - 6), H); g.clip();
+    g.fillStyle = on ? C.ink : C.muted; g.fillText(c.text.replace(/\n/g, " "), a + 4, 3); g.restore();
+    if (on) { g.fillStyle = C.accent; g.fillRect(a - 1, 0, 3, H); g.fillRect(b - 2, 0, 3, H); }
+  }
+  // loudness (10 ms dBFS): one bar per pixel, the loudest sample in it, scaled to this window's range so
+  // pauses stand out even under background music
+  const e = S.energy, bars = new Float32Array(W);
+  let lo = Infinity, hi = -Infinity;
+  for (let px = 0; px < W; px++) {
+    const a = Math.floor((t0 + px / W * (t1 - t0)) * 100), b = Math.max(a + 1, Math.floor((t0 + (px + 1) / W * (t1 - t0)) * 100));
+    let m = -100;
+    for (let k = a; k < b && k < e.length; k++) if (e[k] > m) m = e[k];
+    bars[px] = m; if (m > -100) { lo = Math.min(lo, m); hi = Math.max(hi, m); }
+  }
+  lo = Math.max(lo, hi - 45);  // ignore digital silence
+  g.fillStyle = C.muted;
+  for (let px = 0; px < W; px++) {
+    const h = Math.max(0.02, Math.min(1, (bars[px] - lo) / Math.max(6, hi - lo))) * (H / 2 - 12);
+    g.fillRect(px, mid - h, 1, h * 2);
+  }
+  // word starts: estimated ones (the ASR never heard them) in orange
+  for (let k = Math.max(0, fi - 8); k < Math.min(S.cues.length, fi + 9); k++) {
+    for (const w of S.cues[k].words || []) {
+      if (w.s < t0 || w.s > t1) continue;
+      g.fillStyle = w.est ? C.warn : "rgba(255,255,255,.35)";
+      g.fillRect(x(w.s), H - (w.est ? 9 : 6), 1.5, w.est ? 9 : 6);
+    }
+  }
+  const p = x(video.currentTime);
+  if (p >= 0 && p <= W) { g.fillStyle = "#fff"; g.fillRect(p, 0, 1.5, H); }
+}
+function wvTime(ev) {
+  const r = $("#waveCv").getBoundingClientRect(), { t0, t1 } = S.wv;
+  return { t: t0 + (ev.clientX - r.left) / r.width * (t1 - t0), px: ev.clientX - r.left, perPx: (t1 - t0) / r.width };
+}
+function wvEdge(ev) {  // which edge of the focused line is under the pointer
+  const c = S.cues[S.wv.i], { t, perPx } = wvTime(ev);
+  if (Math.abs(t - c.start) < 6 * perPx) return "start";
+  if (Math.abs(t - c.end) < 6 * perPx) return "end";
+  return null;
+}
+function wvSnap(t, perPx) {  // stick to a nearby word boundary (hold ⌥ to drag freely)
+  let best = t, d = 5 * perPx;
+  for (let k = Math.max(0, S.wv.i - 1); k <= Math.min(S.cues.length - 1, S.wv.i + 1); k++)
+    for (const w of S.cues[k].words || []) for (const v of [w.s, w.e]) if (Math.abs(v - t) < d) { d = Math.abs(v - t); best = v; }
+  return best;
+}
+const waveCv = $("#waveCv");
+waveCv.addEventListener("pointermove", (ev) => {
+  if (!S.wv) return;
+  const dr = S.wv.drag;
+  if (!dr) { waveCv.style.cursor = wvEdge(ev) ? "ew-resize" : "crosshair"; return; }
+  const i = S.wv.i, c = S.cues[i], prev = S.cues[i - 1], next = S.cues[i + 1], { t, perPx } = wvTime(ev);
+  let v = ev.altKey ? t : wvSnap(t, perPx);
+  if (dr === "start") v = Math.min(Math.max(v, prev ? prev.end : 0), c.end - 0.1);  // never into the neighbour
+  else v = Math.max(Math.min(v, next ? next.start : Infinity), c.start + 0.1);
+  c[dr] = +v.toFixed(3);
+  wvInfo();
+});
+waveCv.addEventListener("pointerdown", (ev) => {
+  if (!S.wv) return;
+  const edge = wvEdge(ev), { t } = wvTime(ev);
+  if (edge) { S.wv.drag = edge; waveCv.setPointerCapture(ev.pointerId); return; }
+  const k = S.cues.findIndex((c) => c.start <= t && t < c.end);
+  if (k >= 0 && k !== S.wv.i) wvFocus(k, false);
+  seek(t);
+});
+waveCv.addEventListener("pointerup", () => {
+  if (!S.wv?.drag) return;
+  const i = S.wv.i;
+  S.wv.drag = null;
+  S.cues[i].reviewed = true;  // a human set this timing by hand
+  rerenderRow(i); setDirty(); markOverlaps(); reviewCount();
+  seek(Math.max(0, S.cues[i].start - 0.3)); S.stopAt = S.cues[i].end + 0.3; video.play().catch(() => {});  // hear the result
+});
+$("#wvPrev").onclick = () => wvJump(-1);
+$("#wvNext").onclick = () => wvJump(1);
+$("#wvPlay").onclick = () => { const c = S.cues[S.wv.i]; seek(Math.max(0, c.start - 0.5)); S.stopAt = c.end + 0.5; video.play().catch(() => {}); };
+$("#wvOk").onclick = () => {
+  const i = S.wv.i;
+  S.cues[i].reviewed = true;
+  rerenderRow(i); setDirty(); reviewCount();
+  wvJump(1);
+};
 
 const tbody = $("#cues tbody");
 tbody.addEventListener("input", (e) => {
@@ -310,11 +473,11 @@ tbody.addEventListener("change", (e) => {
   if (v == null) { e.target.value = fmt(S.cues[i][f]); return; }
   S.cues[i][f] = v;
   e.target.value = fmt(v);
-  setDirty(); markOverlaps();
+  setDirty(); markOverlaps(); reviewCount();
 });
 tbody.addEventListener("focusin", (e) => {
   const tr = e.target.closest("tr");
-  if (tr) S.focusRow = +tr.dataset.i;
+  if (tr) { S.focusRow = +tr.dataset.i; wvFocus(S.focusRow); }
 });
 tbody.addEventListener("click", (e) => {
   const tr = e.target.closest("tr");
@@ -326,6 +489,7 @@ tbody.addEventListener("click", (e) => {
   else if (a === "merge") merge(i);
   else if (a === "del") { S.cues.splice(i, 1); setDirty(); renderCues(); }
   else if (e.target.closest("td.n")) seek(S.cues[i].start);
+  if (S.cues[i]) wvFocus(i);
 });
 
 function splitAt(i, t) {
@@ -379,11 +543,12 @@ $$("[data-export]").forEach((a) => a.onclick = async (e) => {
 
 function applyFilter() {
   const q = $("#search").value.trim().toLowerCase();
-  const only = $("#onlyChanged").checked;
+  const only = $("#onlyChanged").checked, rev = $("#onlyReview").checked;
   $$("#cues tbody tr").forEach((tr) => {
-    const c = S.cues[+tr.dataset.i];
+    const i = +tr.dataset.i, c = S.cues[i];
     const hit = (!q || (c.text + " " + (c.tr || "")).toLowerCase().includes(q)) &&
-      (!only || (c.asr && normTxt(c.asr) !== normTxt(c.text)));
+      (!only || (c.asr && normTxt(c.asr) !== normTxt(c.text))) &&
+      (!rev || issues(c, i).length || i === S.wv?.i);
     tr.hidden = !hit;
   });
 }
@@ -395,6 +560,7 @@ $("#karaoke").addEventListener("change", async (e) => {  // shared with the high
   renderOpts();
 });
 $("#onlyChanged").addEventListener("change", applyFilter);
+$("#onlyReview").addEventListener("change", applyFilter);
 
 // ───────── playback sync
 function seek(t) { exitPreview(); video.currentTime = Math.max(0, t); }  // back to the source timeline
@@ -422,6 +588,8 @@ function tick() {
       if ($("#follow").checked && !video.paused && !editing) tr.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }
+  if (i >= 0 && S.wv && i !== S.wv.i && !video.paused && !S.wv.drag) wvFocus(i, false);
+  if (!$("#wave").hidden) drawWave();
   composite(t, i);
   requestAnimationFrame(tick);
 }
@@ -531,6 +699,8 @@ document.addEventListener("keydown", (e) => {
   else if (e.code === "BracketLeft" && row != null && S.cues[row]) { e.preventDefault(); S.cues[row].start = video.currentTime; rerenderRow(row); setDirty(); markOverlaps(); }
   else if (e.code === "BracketRight" && row != null && S.cues[row]) { e.preventDefault(); S.cues[row].end = video.currentTime; rerenderRow(row); setDirty(); markOverlaps(); }
   else if (e.code === "KeyS" && row != null && S.cues[row]) { e.preventDefault(); splitAt(row, video.currentTime); }
+  else if (e.code === "ArrowUp" && S.wv) { e.preventDefault(); wvJump(-1); }
+  else if (e.code === "ArrowDown" && S.wv) { e.preventDefault(); wvJump(1); }
   else if (e.code === "ArrowLeft") { e.preventDefault(); S.seq ? reelSeek(Math.max(0, reelTime() - 2)) : seek(video.currentTime - 2); }
   else if (e.code === "ArrowRight") { e.preventDefault(); S.seq ? reelSeek(reelTime() + 2) : seek(video.currentTime + 2); }
 });
@@ -617,6 +787,8 @@ $("#createBtn").onclick = async (e) => {
 $$(".views button").forEach((b) => b.onclick = () => {
   $$(".views button").forEach((x) => x.classList.toggle("active", x === b));
   $$(".view").forEach((v) => v.hidden = v.id !== "view-" + b.dataset.view);
+  S.view = b.dataset.view;
+  wvShow();
 });
 const pidURL = () => `/api/projects/${encodeURIComponent(S.cur.id)}`;
 async function refreshExtras() {

@@ -1209,7 +1209,8 @@ def finalize_cues(groups: list[list[dict]]) -> list[dict]:
                 if parts[i] else join_tokens([w["t"] for w in ws]))
         out.append({"start": round(start, 3), "end": round(end, 3), "text": text, "dialog": bool(parts[i]),
                     **({"split": len(parts[i][0])} if parts[i] else {}),
-                    "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3)} for w in ws],
+                    "words": [{"t": w["t"], "s": round(w["s"], 3), "e": round(w["e"], 3), **({"est": True} if w.get("est") else {})}
+                              for w in ws],
                     "spk": bool(ws[0].get("spk")), "est": sum(1 for w in ws if w.get("est")) >= 2})
     return out
 

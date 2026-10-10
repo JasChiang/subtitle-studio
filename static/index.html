@@ -63,7 +63,19 @@
             <label class="toggle"><input type="checkbox" id="showOverlay" checked> 疊字幕與字卡</label>
             <label class="toggle" title="與輸出的精華影片共用這個設定"><input type="checkbox" id="karaoke"> 逐字變色</label>
             <span class="spacer"></span>
-            <span class="keys" title="快速鍵"><kbd>⌥Space</kbd> 播放 <kbd>⌥[</kbd><kbd>⌥]</kbd> 入出點 <kbd>⌥S</kbd> 切開 <kbd>⌘S</kbd> 存檔</span>
+            <span class="keys" title="快速鍵"><kbd>⌥Space</kbd> 播放 <kbd>⌥[</kbd><kbd>⌥]</kbd> 入出點 <kbd>⌥S</kbd> 切開 <kbd>⌥↑</kbd><kbd>⌥↓</kbd> 上／下一個待檢查 <kbd>⌘S</kbd> 存檔</span>
+          </div>
+          <div id="wave" class="wave" hidden>
+            <div class="wave-bar">
+              <span id="wvInfo" class="wv-info"></span>
+              <span class="spacer"></span>
+              <button id="wvPrev" class="ghost" title="上一個待檢查（⌥↑）">◀</button>
+              <span id="wvCount" class="wv-count"></span>
+              <button id="wvNext" class="ghost" title="下一個待檢查（⌥↓）">▶</button>
+              <button id="wvPlay" title="播放這一條（前後各多 0.5 秒）">播放這條</button>
+              <button id="wvOk" title="看過了、沒問題：從待檢查清單移除">✓ 已檢查</button>
+            </div>
+            <canvas id="waveCv" aria-label="聲音波形：拖拉黃色框的左右邊調整入出點，點其他地方跳到那個時間"></canvas>
           </div>
         </div>
 
@@ -102,6 +114,7 @@
           <span id="dirty" class="dirty" hidden>有未存檔的修改</span>
           <input id="search" type="search" placeholder="搜尋原文或譯文">
           <label class="toggle"><input type="checkbox" id="onlyChanged"> 只看校正改過的</label>
+          <label class="toggle" title="時間是估計的、顯示太短、讀速太快或跟下一條重疊的字幕"><input type="checkbox" id="onlyReview"> 只看待檢查<span id="reviewN" class="review-n"></span></label>
           <span class="spacer"></span>
           <div class="export" role="group" aria-label="匯出">
             <span class="export-label">匯出</span>
