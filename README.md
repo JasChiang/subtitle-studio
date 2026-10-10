@@ -60,8 +60,11 @@ Apple 語音辨識支援的語言都能用（英、中〔台灣／中國／香�
 ```bash
 ./setup.sh          # 編譯 bin/apple-asr 與 bin/text-render、從 .env.example 建立 .env
 # 編輯 .env：GEMINI_API_KEY=...
-./run.sh            # 啟動伺服器並開啟 http://127.0.0.1:8765（PORT=xxxx ./run.sh 可換埠）
+./run.sh            # 啟動伺服器並開啟 http://127.0.0.1:8765（PORT=xxxx ./run.sh 可換埠，NO_OPEN=1 不自動開瀏覽器）
 ```
+
+- `run.sh` 會在 Swift 原始碼比編譯好的程式新時（例如 `git pull` 之後）自動重新編譯；連接埠上已有舊的 Subtitle Studio 時會先關掉再重開，被其他程式占用時會說明是哪個程式。
+- 用 python.org 安裝的 Python 時，若沒執行過它附的「Install Certificates」，工具會自動改用 macOS 的系統憑證連線，不需要另外處理。
 
 第一次用某個語言時，macOS 會自動下載對應的語音模型。
 
