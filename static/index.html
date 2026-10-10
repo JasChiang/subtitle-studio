@@ -169,8 +169,13 @@
     <div id="drop" class="drop">也可以把影片拖到這裡上傳（會複製一份到 uploads/）</div>
     <div class="grid2">
       <label>說話的語言<select id="newLocale"></select></label>
-      <label>看影片用的模型<input id="newRefModel" class="path-input"></label>
+      <label>字幕翻譯成<select id="newTarget">
+        <option value="auto" selected>自動（中文影片→英文，其他→繁體中文）</option>
+        <option>繁體中文（台灣）</option><option>English</option><option>简体中文</option>
+        <option>日本語</option><option>한국어</option><option value="none">不翻譯（只要原文字幕）</option></select></label>
+      
     </div>
+    <label for="newRefModel">看影片用的模型</label><input id="newRefModel" class="path-input">
     <label for="newContext">影片脈絡（選填）：誰、什麼節目。填了人名和專有名詞會更準</label>
     <textarea id="newContext" rows="2" placeholder="例：科技 Podcast，主持人訪問某新創執行長，談 AI 晶片與資料中心"></textarea>
     <label for="newGlossary">詞彙表（選填）：容易聽錯的人名、品牌、術語，用逗號分隔</label>
@@ -201,6 +206,8 @@
   </form>
 </dialog>
 
+<datalist id="langList"><option value="auto"><option value="繁體中文（台灣）"><option value="English"><option value="简体中文">
+  <option value="日本語"><option value="한국어"><option value="Español"><option value="Français"><option value="Deutsch"></datalist>
 <script src="/static/app.js"></script>
 </body>
 </html>

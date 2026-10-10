@@ -45,7 +45,7 @@ DEFAULT_OPTIONS = {
     "max_duration": 6.5,
     "gap_break": 0.7,
     "translate": True,
-    "target_lang": "繁體中文（台灣）",
+    "target_lang": "auto",         # auto = Chinese video → English, anything else → 繁體中文（台灣）
     "karaoke": False,              # word-by-word highlight, in the web preview AND the burned-in video
     "sub_order": "tr-first",       # bilingual line order, shared by the web preview and burned-in video
     "translate_style": "",         # empty = automatic for the target language (Taiwan wording for 繁體中文)
@@ -411,6 +411,22 @@ def detect_languages(p: Project) -> dict:
     return data
 
 
+def auto_target(spoken: str) -> str:
+    """Default translation language for a spoken language: never translate a video into its own language."""
+    return "English" if lang_base(spoken) in ("zh", "yue", "cmn") else "繁體中文（台灣）"
+
+
+def resolve_target(p: Project) -> dict:
+    """Turn target_lang 'auto' into a concrete language once the spoken language is known."""
+    o = p.options
+    if o.get("target_lang") == "auto":
+        spoken = (p.read("languages.json") or {}).get("primary") or o.get("locale", "")
+        tgt = auto_target(spoken)
+        p.update(options={**p.meta.get("options", {}), "target_lang": tgt})
+        p.log(f"  自動選擇翻譯語言：{tgt}（影片主要是 {spoken or '未知語言'}）")
+    return p.options
+
+
 def languages_note(p: Project) -> str:
     """'Spoken: Chinese (zh-TW) ~80%, English ~20%; mixed inside sentences' — for correction / translation prompts."""
     d = p.read("languages.json") or {}
@@ -498,6 +514,7 @@ def stage_asr(p: Project):
         p.update(options={**p.meta.get("options", {}), "locale": loc})
         o = p.options
         p.log(f"  自動選擇辨識語言：{loc}" + ("" if primary else "（無法判斷，預設英文）"))
+    o = resolve_target(p)
     proc = subprocess.Popen([str(ASR_BIN), str(wav), "--locale", o["locale"]], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     duration = None
@@ -1440,7 +1457,7 @@ def echo_ok(echo: str, text: str) -> bool:
 
 
 def stage_translate(p: Project, only_missing: bool = False):
-    o = p.options
+    o = resolve_target(p)
     doc = p.read("cues.json")
     cues = doc["cues"]
     ref = p.read("reference.json") or {}

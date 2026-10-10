@@ -25,6 +25,15 @@ class Locales(unittest.TestCase):
         self.assertEqual(pl.lang_base("yue-HK"), "yue")
 
 
+class Targets(unittest.TestCase):
+    def test_never_translate_into_the_spoken_language(self):
+        self.assertEqual(pl.auto_target("zh-TW"), "English")
+        self.assertEqual(pl.auto_target("yue-CN"), "English")
+        self.assertEqual(pl.auto_target("en-US"), "繁體中文（台灣）")
+        self.assertEqual(pl.auto_target("ja-JP"), "繁體中文（台灣）")
+        self.assertEqual(pl.auto_target(""), "繁體中文（台灣）")
+
+
 class OtherLanguageSpans(unittest.TestCase):
     # ASR words every 0.4 s (0.3 s long) with gaps at 5.1–5.3 and 10.0–10.4
     words = [{"s": t / 10, "e": t / 10 + 0.3} for t in list(range(0, 50, 4)) + list(range(53, 100, 4)) +

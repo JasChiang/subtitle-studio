@@ -26,7 +26,7 @@ const OPT_FIELDS = [
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
   ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["proxy", "預覽代理檔", "select:auto=需要時才做（原片太大或瀏覽器播不了）|always=一律使用|never=不使用，直接播放原片"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
-  ["target_lang", "目標語言（例：繁體中文（台灣）、简体中文、日本語、English）", "text"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
+  ["target_lang", "翻譯成（auto＝中文影片翻英文、其他翻繁中；也可以自己輸入語言）", "lang"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
 ];
 
 const S = { defaults: null, locales: [], projects: [], cur: null, cues: [], dirty: false, active: -1, poll: null, stopAt: null };
@@ -113,8 +113,10 @@ function renderStages() {
   const allDone = S.defaults.stages.every((s) => done.has(s));
   $("#stageList").innerHTML = (allDone ? `<p class="hint all-done">全部步驟都完成了。要重跑哪一步，再勾選它。</p>` : "") + S.defaults.stages.map((s) => {
     const checked = !done.has(s) ? "checked" : "";  // only steps not done yet; re-running is a deliberate choice
+    const o = { ...S.defaults.options, ...(S.cur.options || {}) };
+    const desc = s === "translate" ? (o.translate === false ? "目前設定為不翻譯" : `翻成：${o.target_lang === "auto" ? "自動（中文影片→英文，其他→繁中）" : o.target_lang}`) : STAGE_INFO[s][1];
     return `<label class="stage ${done.has(s) ? "done" : ""} ${st.state === "running" && st.stage === s ? "cur" : ""}">
-      <input type="checkbox" value="${s}" ${checked}><span class="dot"></span><span><b>${STAGE_INFO[s][0]}</b> <span class="desc">${STAGE_INFO[s][1]}</span></span></label>`;
+      <input type="checkbox" value="${s}" ${checked}><span class="dot"></span><span><b>${STAGE_INFO[s][0]}</b> <span class="desc">${esc(desc)}</span></span></label>`;
   }).join("");
 }
 
@@ -199,6 +201,7 @@ function renderOpts() {
     if (type === "bool") return `<label class="row gap"><input type="checkbox" name="${k}" ${v ? "checked" : ""}> ${label}</label>`;
     if (type === "textarea") return `<label><span>${label}</span><textarea name="${k}" rows="2">${esc(v)}</textarea></label>`;
     if (type.startsWith("select:")) return `<label><span>${label}</span><select name="${k}">${type.slice(7).split("|").map((o) => { const [val, txt] = o.split("="); return `<option value="${val}" ${val === v ? "selected" : ""}>${txt}</option>`; }).join("")}</select></label>`;
+    if (type === "lang") return `<label><span>${label}</span><input name="${k}" list="langList" value="${esc(v)}"></label>`;
     if (type === "locale") return `<label><span>${label}</span><select name="${k}"><option value="auto" ${v === "auto" ? "selected" : ""}>自動判斷（下次重跑辨識時）</option>${S.locales.map((l) => `<option ${l === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
     return `<label><span>${label}</span><input name="${k}" type="${type}" step="any" value="${esc(v)}" class="${type === "text" ? "mono" : ""}"></label>`;
   }).join("");
@@ -211,6 +214,7 @@ $("#saveOpts").onclick = async () => {
   }
   await api(`/api/projects/${encodeURIComponent(S.cur.id)}/options`, { method: "POST", body: out });
   S.cur.options = out;
+  renderStages();
   $("#saveOpts").textContent = "已儲存 ✓";
   setTimeout(() => $("#saveOpts").textContent = "儲存設定", 1200);
 };
@@ -573,6 +577,7 @@ $("#createBtn").onclick = async (e) => {
   try {
     const p = await api("/api/projects", { method: "POST", body: { path: $("#pathInput").value.trim(), options: {
       locale: $("#newLocale").value, ref_model: $("#newRefModel").value.trim() || S.defaults.options.ref_model,
+      ...($("#newTarget").value === "none" ? { translate: false } : { translate: true, target_lang: $("#newTarget").value }),
       context: $("#newContext").value, glossary: $("#newGlossary").value } } });
     dlg.close();
     await api(`/api/projects/${encodeURIComponent(p.id)}/run`, { method: "POST", body: { stages: S.defaults.stages } }).catch(() => {});

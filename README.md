@@ -155,7 +155,7 @@ python3 -m studio.cli --project <id> --stages cues,translate      # 重跑部分
 | `max_chars` / `max_duration` / `gap_break` | 0（自動：英 42、中／日 16、韓 20）/ 6.5 / 0.7 | 每行字數上限（斷句與翻譯都會參考），以及規則斷句的參數 |
 | `proxy` | auto | 預覽代理檔：auto（需要時才做）／always／never |
 | `sub_scale` / `loudnorm` | 100 / true | 字幕字級（%，預覽與輸出相同）；輸出影片時統一音量到 -14 LUFS |
-| `target_lang` / `translate_style` | 繁體中文（台灣）／（自動） | 翻譯目標語言；風格留空時依目標語言自動決定 |
+| `translate` / `target_lang` / `translate_style` | true / auto／（自動） | 要不要翻譯；翻成哪種語言（auto＝中文影片翻英文、其他翻繁體中文，不會翻成影片本身的語言）；風格留空時依目標語言自動決定 |
 | `karaoke` / `sub_order` | false / 譯文在上 | 逐字變色、雙語上下順序（預覽與輸出共用） |
 | `correct_with_audio` / `energy_snap` / `backchannels` | true / true / 省略 | 校正時聽音訊、依音量校正字的邊界、附和（mm-hmm）怎麼處理 |
 
