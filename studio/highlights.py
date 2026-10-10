@@ -567,10 +567,30 @@ def list_exports(p: Project) -> list[dict]:
             if not f.name.endswith(".part.mp4")]
 
 
+STANDARD_FPS = [("24000/1001", 23.976), ("24", 24.0), ("25", 25.0), ("30000/1001", 29.97), ("30", 30.0),
+                ("50", 50.0), ("60000/1001", 59.94), ("60", 60.0)]
+
+
+def standard_fps(rate: str) -> str:
+    """Export frame rate: phones report odd variable rates (iPhone 4K 120 fps → '290395/2421'); writing those
+    straight into an MP4 gives odd timescales some players misread (slow / wrong-length playback). Halve
+    anything above 60 fps, then snap to the nearest standard rate."""
+    try:
+        num, _, den = rate.partition("/")
+        f = float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):
+        f = 0.0
+    if f <= 0:
+        return "30000/1001"
+    while f > 61:
+        f /= 2
+    return min(STANDARD_FPS, key=lambda x: abs(x[1] - f))[0]
+
+
 def probe_fps(path: Path) -> str:
     r = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                                  "stream=avg_frame_rate", "-of", "csv=p=0", str(path)]).decode().strip()
-    return r if r and r != "0/0" else "30000/1001"
+    return standard_fps(r if r and r != "0/0" else "")
 
 
 def sub_scale(p: Project) -> float:
@@ -683,7 +703,8 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
     enc = ["-c:v", "h264_videotoolbox", "-b:v", "8M"] if hw_encoder() else ["-c:v", "libx264", "-crf", "19",
                                                                              "-preset", "medium"]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", fc, "-map", f"[{cur}]",
-           "-map", "[ac]", *soft, *enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-dn",
+           "-map", "[ac]", *soft, *enc, "-pix_fmt", "yuv420p", "-r", fps, "-fps_mode", "cfr",
+           "-c:a", "aac", "-b:a", "192k", "-dn",
            "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(tmp)]
     p.log(f"輸出{label}：{n} 段、{len(subs)} 條字幕、{total:.1f} 秒（{'硬體' if hw_encoder() else '軟體'}編碼，{fps} fps）")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

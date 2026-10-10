@@ -104,6 +104,18 @@ class Karaoke(unittest.TestCase):
         self.assertEqual(pl.dialog_split({**c, "split": None}), 2)
 
 
+class FrameRate(unittest.TestCase):
+    def test_odd_phone_rates_snap_to_standard(self):
+        self.assertEqual(hl.standard_fps("290395/2421"), "60")  # iPhone 4K ~120 fps → 59.97 → 60
+        self.assertEqual(hl.standard_fps("120/1"), "60")
+        self.assertEqual(hl.standard_fps("30000/1001"), "30000/1001")
+        self.assertEqual(hl.standard_fps("2997/100"), "30000/1001")
+        self.assertEqual(hl.standard_fps("25/1"), "25")
+        self.assertEqual(hl.standard_fps("24000/1001"), "24000/1001")
+        self.assertEqual(hl.standard_fps("0/0"), "30000/1001")
+        self.assertEqual(hl.standard_fps(""), "30000/1001")
+
+
 class Reel(unittest.TestCase):
     cues = [
         {"text": "first line", "tr": "第一句", "start": 0.9, "end": 2.6,
