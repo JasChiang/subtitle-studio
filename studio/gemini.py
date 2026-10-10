@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import threading
 import time
 import urllib.error
@@ -68,11 +69,36 @@ class Usage:
             return {"models": out, "usd": round(total, 4)}
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """HTTPS trust store. Python from the python.org installer ships without CA certificates until its
+    'Install Certificates.command' is run, which makes every Gemini call fail with CERTIFICATE_VERIFY_FAILED.
+    When Python's own bundle is missing, fall back to certifi (if installed) or macOS's /etc/ssl/cert.pem."""
+    paths = ssl.get_default_verify_paths()
+    has_bundle = bool(paths.cafile and os.path.exists(paths.cafile)) or \
+        bool(paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath))
+    if has_bundle:
+        return ssl.create_default_context()
+    candidates = []
+    try:
+        import certifi  # optional
+        candidates.append(certifi.where())
+    except ImportError:
+        pass
+    candidates += ["/etc/ssl/cert.pem", "/opt/homebrew/etc/ca-certificates/cert.pem", "/usr/local/etc/openssl@3/cert.pem"]
+    for f in candidates:
+        if f and os.path.exists(f):
+            return ssl.create_default_context(cafile=f)
+    return ssl.create_default_context()
+
+
+_SSL = _ssl_context()
+
+
 def _request(url: str, *, data: bytes | None = None, headers: dict | None = None, method: str | None = None,
              timeout: float = 600):
     req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
