@@ -24,7 +24,7 @@ const OPT_FIELDS = [
   ["chunk_minutes", "每段分鐘數", "number"], ["drop_fillers", "移除 um / uh 等語助詞", "bool"], ["semantic_breaks", "語意斷句（Gemini 判斷斷點）", "bool"],
   ["correct_with_audio", "校正時讓 Gemini 聽音訊", "bool"], ["cjk_spacing", "中文與英文／數字之間加半形空格", "bool"], ["energy_snap", "依聲音音量校正字的邊界", "bool"],
   ["backchannels", "附和（mm-hmm、yeah）", "select:omit=沒資訊的省略（一般做法）|keep=全部保留"],
-  ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["proxy", "預覽代理檔", "select:auto=需要時才做（原片太大或瀏覽器播不了）|always=一律使用|never=不使用，直接播放原片"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
+  ["max_chars", "每行字數上限（0 = 自動：英文 42、中文／日文 16、韓文 20）", "number"], ["sub_scale", "字幕字級（%，預覽與輸出相同）", "number"], ["proxy", "預覽代理檔", "select:auto=需要時才做（原片太大或瀏覽器播不了）|always=一律使用|never=不使用，直接播放原片"], ["export_fps", "輸出影片幀率", "select:auto=自動（超過 60fps 減半，檔案小、各平台都能播）|source=維持原幀率（120fps 原片照樣輸出 120fps）"], ["loudnorm", "輸出影片時統一音量（-14 LUFS）", "bool"], ["max_duration", "每條最長秒數", "number"],
   ["gap_break", "停頓多久強制斷開（秒）", "number"], ["karaoke", "逐字變色（預覽與輸出影片相同）", "bool"], ["translate", "要翻譯", "bool"],
   ["target_lang", "翻譯成（auto＝中文影片翻英文、其他翻繁中；也可以自己輸入語言）", "lang"], ["sub_order", "雙語字幕順序（預覽與輸出影片相同）", "select:tr-first=譯文在上、原文在下|src-first=原文在上、譯文在下"], ["translate_style", "翻譯風格（留空＝依目標語言自動）", "textarea"], ["workers", "並行數", "number"],
 ];
@@ -750,7 +750,9 @@ function renderPlan() {
       <button id="plPreview" class="primary">▶ 預覽</button><button id="plSave">存檔</button></div>
     <div class="muted small">要求：${esc(pl.request?.focus || "AI 自選最精彩段落")}｜目標 ${pl.request?.seconds || "?"} 秒。
       預覽在上方播放器即時合成（字幕、字卡、標籤、放大都沒有燒進去），下面的字幕可以直接改，改完預覽立刻反映。</div>
-    ${(pl.hook || []).length ? `<div class="chap"><b>開頭 hook</b>${pl.hook.map((c, k) => clipRow(c, -1, k)).join("")}</div>` : ""}
+    <div class="chap"><div class="chap-head"><b class="grow">開頭 hook</b>
+        <button data-ci="-1" data-a="addHere" title="先在字幕分頁或播放器找到想當開場的那一句，再按這裡加進 hook">＋ 在播放點加一段</button></div>
+        ${(pl.hook || []).map((c, k) => clipRow(c, -1, k)).join("") || `<p class="muted small">沒有 hook；影片直接從第一章開始。</p>`}</div>
     ${pl.chapters.map((ch, ci) => `<div class="chap"><div class="chap-head">
         <input data-ci="${ci}" data-f="title" value="${esc(ch.title)}" placeholder="章節標題">
         <input data-ci="${ci}" data-f="title_en" value="${esc(ch.title_en || "")}" placeholder="English title">
@@ -830,8 +832,9 @@ $("#hlEdit").addEventListener("click", async (e) => {
     const ci = +e.target.dataset.ci, t = video.currentTime, i = lineAt(t);
     if (i < 0) return;
     const c = { start: cutBefore(i), end: cutAfter(i), from: S.cues[i].id, to: S.cues[i].id, why: "手動加入" };
-    const list = S.plan.chapters[ci].clips;
-    const at = list.findIndex((x) => x.start > c.start);  // keep the chapter in source order
+    if (ci < 0) S.plan.hook = S.plan.hook || [];
+    const list = clipsOf(ci);
+    const at = ci < 0 ? -1 : list.findIndex((x) => x.start > c.start);  // keep a chapter in source order; hook appends
     list.splice(at < 0 ? list.length : at, 0, c);
     planChanged(); return renderPlan();
   }

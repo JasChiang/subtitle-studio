@@ -115,6 +115,11 @@ class FrameRate(unittest.TestCase):
         self.assertEqual(hl.standard_fps("0/0"), "30000/1001")
         self.assertEqual(hl.standard_fps(""), "30000/1001")
 
+    def test_keep_high_rates(self):
+        self.assertEqual(hl.standard_fps("290395/2421", keep_high=True), "120")  # 119.95 → 120
+        self.assertEqual(hl.standard_fps("240/1", keep_high=True), "120")
+        self.assertEqual(hl.standard_fps("30000/1001", keep_high=True), "30000/1001")
+
 
 class Reel(unittest.TestCase):
     cues = [

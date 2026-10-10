@@ -40,6 +40,7 @@ DEFAULT_OPTIONS = {
     "cjk_spacing": True,           # half-width space between CJK and Latin letters / digits in Chinese text
     "max_chars": 0,                # 0 = auto by script: Latin 42, Chinese / Japanese 16, Korean 20 per line
     "sub_scale": 100,              # subtitle font size, % of the default (preview and export alike)
+    "export_fps": "auto",          # exports: auto = standard rate ≤ 60 fps; source = keep high rates (100/120 fps)
     "loudnorm": True,              # exports: normalise loudness to -14 LUFS (YouTube's reference)
     "proxy": "auto",               # editing proxy for preview: auto (only when needed) | always | never
     "max_duration": 6.5,

@@ -569,12 +569,13 @@ def list_exports(p: Project) -> list[dict]:
 
 STANDARD_FPS = [("24000/1001", 23.976), ("24", 24.0), ("25", 25.0), ("30000/1001", 29.97), ("30", 30.0),
                 ("50", 50.0), ("60000/1001", 59.94), ("60", 60.0)]
+HIGH_FPS = [("100", 100.0), ("120000/1001", 119.88), ("120", 120.0)]
 
 
-def standard_fps(rate: str) -> str:
+def standard_fps(rate: str, keep_high: bool = False) -> str:
     """Export frame rate: phones report odd variable rates (iPhone 4K 120 fps → '290395/2421'); writing those
     straight into an MP4 gives odd timescales some players misread (slow / wrong-length playback). Halve
-    anything above 60 fps, then snap to the nearest standard rate."""
+    anything above 60 fps (unless keep_high: 100 / 119.88 / 120 stay), then snap to the nearest standard rate."""
     try:
         num, _, den = rate.partition("/")
         f = float(num) / float(den or 1)
@@ -582,15 +583,16 @@ def standard_fps(rate: str) -> str:
         f = 0.0
     if f <= 0:
         return "30000/1001"
-    while f > 61:
+    rates = STANDARD_FPS + (HIGH_FPS if keep_high else [])
+    while f > rates[-1][1] + 1:
         f /= 2
-    return min(STANDARD_FPS, key=lambda x: abs(x[1] - f))[0]
+    return min(rates, key=lambda x: abs(x[1] - f))[0]
 
 
-def probe_fps(path: Path) -> str:
+def probe_fps(path: Path, keep_high: bool = False) -> str:
     r = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                                  "stream=avg_frame_rate", "-of", "csv=p=0", str(path)]).decode().strip()
-    return standard_fps(r if r and r != "0/0" else "")
+    return standard_fps(r if r and r != "0/0" else "", keep_high)
 
 
 def sub_scale(p: Project) -> float:
@@ -624,7 +626,7 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
         raise RuntimeError("bin/text-render 不存在，先跑 ./setup.sh")
     pieces = timeline(plan)
     W, H = probe_size(p.media)
-    fps = probe_fps(p.media)
+    fps = probe_fps(p.media, p.options.get("export_fps") == "source")
     work.mkdir(parents=True, exist_ok=True)
     for f in work.glob("*.png"):
         f.unlink()
