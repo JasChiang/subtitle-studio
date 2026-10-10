@@ -104,6 +104,32 @@ class Karaoke(unittest.TestCase):
         self.assertEqual(pl.dialog_split({**c, "split": None}), 2)
 
 
+class Stretched(unittest.TestCase):
+    def test_added_words_borrow_a_stretched_character(self):
+        # ASR: ち ょ、 … で(1.8 s); correction added ハッキング、やめっ！ crammed into 0.18 s
+        w = lambda t, s, e: {"t": t, "s": s, "e": e}
+        dst = [w("ち", 274.23, 274.44), w("ょ、", 274.44, 274.5)] + \
+            [w(c, 274.44 + k * 0.025, 274.44 + (k + 1) * 0.025) for k, c in enumerate(["ハ", "ッ", "キ", "ン", "グ、", "や", "め"])] + \
+            [w("っ！", 274.59, 274.62), w("で", 274.62, 276.37), w("さ、", 276.72, 277.1)]
+        pl.unsqueeze(dst, 274.0, 278.0)
+        added = dst[2:10]
+        self.assertGreater(added[-1]["e"] - added[0]["s"], 1.5)
+        self.assertAlmostEqual(dst[10]["s"], 276.17, places=2)
+        self.assertEqual(dst[10]["e"], 276.37)
+
+    def test_trim_stretched(self):
+        w = lambda t, s, e: {"t": t, "s": s, "e": e}
+        ws = [w("の…", 114.96, 115.44), w("ち", 115.58, 119.53), w("ょ", 119.64, 119.73)]
+        pl.trim_stretched(ws)
+        self.assertAlmostEqual(ws[1]["s"], 119.23)  # speech follows → the character is at the end
+        ws = [w("め…", 269.58, 273.56), w("ち", 274.23, 274.44)]
+        pl.trim_stretched(ws)
+        self.assertAlmostEqual(ws[0]["e"], 270.08)  # pause follows → at the start
+        ws = [w("ねえ", 1.0, 3.0)]
+        pl.trim_stretched(ws)
+        self.assertEqual(ws[0]["e"], 3.0)  # two characters: not touched
+
+
 class FrameRate(unittest.TestCase):
     def test_odd_phone_rates_snap_to_standard(self):
         self.assertEqual(hl.standard_fps("290395/2421"), "60")  # iPhone 4K ~120 fps → 59.97 → 60

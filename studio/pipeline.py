@@ -972,8 +972,14 @@ def unsqueeze(dst: list[dict], lo: float, hi: float, fast: float = 0.08):
         if j - i + 1 < 3:  # one or two short words (a, I, the) are normal speech
             i = j + 1
             continue
+        if j + 2 < n and dst[j + 1]["e"] - dst[j + 1]["s"] < 0.06 and stretched(dst[j + 2]):
+            j += 1  # a last squeezed character just over the threshold still belongs to the run
         a0 = dst[i - 1]["s"] + 0.6 * (dst[i - 1]["e"] - dst[i - 1]["s"]) if i > 0 else lo
         b0 = dst[j + 1]["s"] if j + 1 < n else hi
+        if j + 1 < n and stretched(dst[j + 1]):
+            # the ASR heard ONE character for seconds right where the added words are missing (shouting over
+            # noise): those seconds are the missing words — keep only a normal length for that character
+            b0 = dst[j + 1]["s"] = round(dst[j + 1]["e"] - 0.2, 3)
         a0 = min(a0, dst[i]["s"])
         if b0 - a0 > dst[j]["e"] - dst[i]["s"]:
             if i > 0:
@@ -982,6 +988,29 @@ def unsqueeze(dst: list[dict], lo: float, hi: float, fast: float = 0.08):
         for u in dst[i:j + 1]:
             u["est"] = True
         i = j + 1
+
+def stretched(u: dict) -> bool:
+    """One Chinese / Japanese character lasting over 1.5 s: the ASR glued noise (a scream, laughter, music)
+    onto it — nobody holds a syllable that long in speech."""
+    return len(norm(u["t"])) == 1 and is_cjk_char(u["t"][0]) and u["e"] - u["s"] > 1.5
+
+
+def trim_stretched(words: list[dict]) -> int:
+    """Shrink stretched characters to where they were really spoken: speech right after → the character is
+    at the END of its span (the noise came first); a pause after → at the START. Otherwise a line shows up
+    seconds early, or lingers through the noise."""
+    n = 0
+    for k, u in enumerate(words):
+        if not stretched(u):
+            continue
+        nxt = words[k + 1] if k + 1 < len(words) else None
+        if nxt and nxt["s"] - u["e"] < 0.15:
+            u["s"] = round(u["e"] - 0.3, 3)
+        else:
+            u["e"] = round(u["s"] + 0.5, 3)
+        n += 1
+    return n
+
 
 def spread(units: list[dict], lo: float, hi: float):
     total = sum(max(1, len(norm(u["t"]))) for u in units) or 1
@@ -1410,6 +1439,9 @@ def stage_cues(p: Project):
     if o.get("energy_snap", True) and (p.dir / "audio.wav").exists():
         moved = snap_to_energy(words, load_energy(p))
         p.log(f"  依聲音音量校正字的邊界：{moved} 處")
+    # after the loudness snap: a scream / laugh is loud too, so the snap happily extends a word across it
+    if (fixed := trim_stretched(words)):
+        p.log(f"  過長的單字（被尖叫、笑聲、雜音拉長）：修正 {fixed} 處")
     old_doc = p.read("cues.json") or {}
     old_cues = old_doc.get("cues", [])
     groups = reuse_lines(old_cues, words) if o.get("reuse_breaks", True) and not old_doc.get("edited") else None
