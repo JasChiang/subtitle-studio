@@ -203,12 +203,26 @@ function renderOpts() {
     if (type === "bool") return `<label class="row gap"><input type="checkbox" name="${k}" ${v ? "checked" : ""}> ${label}</label>`;
     if (type === "textarea") return `<label><span>${label}</span><textarea name="${k}" rows="2">${esc(v)}</textarea></label>`;
     if (type.startsWith("select:")) return `<label><span>${label}</span><select name="${k}">${type.slice(7).split("|").map((o) => { const [val, txt] = o.split("="); return `<option value="${val}" ${val === v ? "selected" : ""}>${txt}</option>`; }).join("")}</select></label>`;
-    if (type === "lang") return `<label><span>${label}</span><input name="${k}" list="langList" value="${esc(v)}"></label>`;
+    if (type === "lang") {  // a real dropdown (a datalist only offers entries matching what's already typed)
+      const presets = ["auto", "繁體中文（台灣）", "English", "简体中文", "日本語", "한국어", "Español", "Français", "Deutsch"];
+      const custom = !presets.includes(v);
+      return `<label><span>${label}</span><select data-lang-for="${k}">${presets.map((x) =>
+        `<option value="${esc(x)}" ${x === v ? "selected" : ""}>${x === "auto" ? "自動（中文影片→英文，其他→繁體中文）" : esc(x)}</option>`).join("")}
+        <option value="__custom" ${custom ? "selected" : ""}>其他（自訂）…</option></select>
+        <input name="${k}" value="${esc(v)}" placeholder="輸入語言，例如 Italiano" ${custom ? "" : "hidden"}></label>`;
+    }
     if (type === "locale") return `<label><span>${label}</span><select name="${k}"><option value="auto" ${v === "auto" ? "selected" : ""}>自動判斷（下次重跑辨識時）</option>${S.locales.map((l) => `<option ${l === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
     return `<label><span>${label}</span><input name="${k}" type="${type}" step="any" value="${esc(v)}" class="${type === "text" ? "mono" : ""}"></label>`;
   }).join("");
 }
 // settings are saved explicitly — and automatically before a run, so a changed-but-unsaved value is never ignored
+$("#optsForm").addEventListener("change", (e) => {  // language dropdown → the hidden text value it controls
+  const k = e.target.dataset?.langFor;
+  if (!k) return;
+  const input = $(`#optsForm input[name="${k}"]`);
+  if (e.target.value === "__custom") { input.hidden = false; input.value = ""; input.focus(); }
+  else { input.hidden = true; input.value = e.target.value; }
+});
 $("#optsForm").addEventListener("input", () => setOptsDirty(true));
 $("#optsForm").addEventListener("change", () => setOptsDirty(true));
 function setOptsDirty(v) {
