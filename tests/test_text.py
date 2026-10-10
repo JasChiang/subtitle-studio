@@ -27,6 +27,13 @@ class Tokenize(unittest.TestCase):
         self.assertEqual(self.roundtrip("VTuberのディアナちゃんで〜す"), "VTuberのディアナちゃんで〜す")
         self.assertEqual(self.roundtrip("Usada Pekoraです"), "Usada Pekoraです")
         self.assertEqual(pl.ja_unspace("38 万！？"), "38万！？")
+
+    def test_karaoke_line_follows_cue_spacing(self):
+        ws = [{"t": t, "s": i, "e": i + 1} for i, t in enumerate(["38", "万", "！？"])]
+        self.assertEqual(pl.marked_source({"text": "38万！？", "words": ws}, -1), "38万！？")
+        self.assertEqual(pl.marked_source({"text": "38 万！？", "words": ws}, -1), "38 万！？")
+        ws = [{"t": t, "s": i, "e": i + 1} for i, t in enumerate(["で", "〜", "す", "！"])]
+        self.assertEqual(pl.marked_source({"text": "で〜す！", "words": ws}, 0), pl.HL_ON + "で" + pl.HL_OFF + "〜す！")
         self.assertEqual(pl.ja_unspace("- AI すごい\n- Usada Pekora"), "- AIすごい\n- Usada Pekora")
 
     def test_korean_keeps_spaces_between_words(self):

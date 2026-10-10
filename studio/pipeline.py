@@ -1028,8 +1028,13 @@ def apply_cjk_spacing(cues: list[dict], o: dict) -> int:
 HL_ON, HL_OFF = "\x01", "\x02"  # karaoke markup understood by bin/text-render and the web preview
 
 
-def _needs_space(prev: str, tok: str) -> bool:
-    return not (prev[-1] in NOSPACE_PUNCT or tok[0] in NOSPACE_PUNCT or (is_cjk_char(prev[-1]) and is_cjk_char(tok[0])))
+_CJK_LATIN_GAP = re.compile(rf"[{CJK}] [0-9A-Za-z]|[0-9A-Za-z] [{CJK}]")
+
+
+def _needs_space(prev: str, tok: str, tight: bool = False) -> bool:
+    """tight: the cue's text puts Latin / digits straight against CJK (Japanese) — rebuild it the same way."""
+    return not (prev[-1] in NOSPACE_PUNCT or tok[0] in NOSPACE_PUNCT or (is_cjk_char(prev[-1]) and is_cjk_char(tok[0]))
+                or (tight and (is_cjk_char(prev[-1]) or is_cjk_char(tok[0]))))
 
 
 def dialog_split(c: dict) -> int:
@@ -1039,7 +1044,7 @@ def dialog_split(c: dict) -> int:
     first = c["text"].split("\n")[0].removeprefix("- ")
     toks = [w["t"] for w in c.get("words") or []]
     for k in range(1, len(toks)):
-        if join_tokens(toks[:k]) == first:
+        if join_tokens(toks[:k]) == first or ja_unspace(join_tokens(toks[:k])) == first:
             return k
     return len(toks)
 
@@ -1051,11 +1056,12 @@ def marked_source(c: dict, t: float) -> str:
     if not ws:
         return c["text"]
     lines = [ws[:dialog_split(c)], ws[dialog_split(c):]] if c.get("dialog") else [ws]
+    tight = not _CJK_LATIN_GAP.search(c["text"])
     out = []
     for line in lines:
         plain, marked = "", ""
         for w in line:
-            sep = " " if plain and _needs_space(plain, w["t"]) else ""
+            sep = " " if plain and _needs_space(plain, w["t"], tight) else ""
             plain += sep + w["t"]
             marked += sep + (HL_ON + w["t"] + HL_OFF if w["s"] <= t + 1e-6 else w["t"])
         out.append(("- " if c.get("dialog") else "") + marked.replace(HL_OFF + " " + HL_ON, " ").replace(HL_OFF + HL_ON, ""))

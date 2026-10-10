@@ -349,10 +349,9 @@ function splitAt(i, t) {
   S.cues.splice(i, 1, a, b);
   setDirty(); renderCues();
 }
-function joinWords(ws) {
-  const cjk = /[\u3400-\u9fff\u3040-\u30ff]/;  // Han + kana (Korean keeps its spaces)
-  const nos = "，。、！？；：「」『』（）《》〈〉～·";
-  return ws.reduce((s, w) => s && !(nos.includes(s.at(-1)) || nos.includes(w.t[0]) || (cjk.test(s.at(-1)) && cjk.test(w.t[0]))) ? s + " " + w.t : s + w.t, "");
+const NOSPACE = "，。、！？；：「」『』（）《》〈〉～〜·", CJKRE = /[\u3400-\u9fff\u3040-\u30ff]/, KANARE = /[\u3040-\u30ff]/;  // Han + kana; Hangul is space-separated
+function joinWords(ws, tight = ws.some((w) => KANARE.test(w.t))) {  // same as pipeline.join_tokens
+  return ws.reduce((s, w) => s && needsSpace(s, w.t, tight) ? s + " " + w.t : s + w.t, "");
 }
 function merge(i) {
   const a = S.cues[i], b = S.cues[i + 1];
@@ -452,21 +451,24 @@ function showLayer(el, url) {  // swap only once the new image is decoded → no
   im.src = url;
   preloaded.add(url);
 }
-const NOSPACE = "，。、！？；：「」『』（）《》〈〉～·", CJKRE = /[\u3400-\u9fff\u3040-\u30ff]/;  // Han + kana; Hangul is space-separated
-const needsSpace = (prev, tok) => !(NOSPACE.includes(prev.at(-1)) || NOSPACE.includes(tok[0]) || (CJKRE.test(prev.at(-1)) && CJKRE.test(tok[0])));
+// tight = Japanese style: Latin / digits written straight against kana and kanji (ホロライブ3期生)
+const needsSpace = (prev, tok, tight) => !(NOSPACE.includes(prev.at(-1)) || NOSPACE.includes(tok[0])
+  || (CJKRE.test(prev.at(-1)) && CJKRE.test(tok[0])) || (tight && (CJKRE.test(prev.at(-1)) || CJKRE.test(tok[0]))));
+const GAPRE = /[\u3400-\u9fff\u3040-\u30ff] [0-9A-Za-z]|[0-9A-Za-z] [\u3400-\u9fff\u3040-\u30ff]/;
 function dialogSplit(c) {  // same as pipeline.dialog_split
   if (c.split) return c.split;
   const first = c.text.split("\n")[0].replace(/^- /, ""), toks = c.words.map((w) => w.t);
-  for (let k = 1; k < toks.length; k++) if (joinWords(c.words.slice(0, k)) === first) return k;
+  for (let k = 1; k < toks.length; k++) if (joinWords(c.words.slice(0, k)) === first || joinWords(c.words.slice(0, k), true) === first) return k;
   return toks.length;
 }
 function markedSource(c, t) {  // same as pipeline.marked_source: per-word highlight, \x01 … \x02
   const ws = c.words;
   const lines = c.dialog ? [ws.slice(0, dialogSplit(c)), ws.slice(dialogSplit(c))] : [ws];
+  const tight = !GAPRE.test(c.text);  // rebuild the line the way its text is written
   return lines.map((line) => {
     let plain = "", marked = "";
     for (const w of line) {
-      const sep = plain && needsSpace(plain, w.t) ? " " : "";
+      const sep = plain && needsSpace(plain, w.t, tight) ? " " : "";
       plain += sep + w.t;
       marked += sep + (w.s <= t + 1e-6 ? "\x01" + w.t + "\x02" : w.t);
     }
