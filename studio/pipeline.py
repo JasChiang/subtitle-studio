@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -186,23 +187,33 @@ class Project:
         self.dir = path
         self.on_change = on_change
         self.usage = gemini.Usage()
+        self._lock = threading.RLock()  # parallel chunks report progress from worker threads
 
     @property
     def meta(self) -> dict:
         return json.loads((self.dir / "project.json").read_text())
 
     def update(self, **kw):
-        m = self.meta
-        m.update(kw)
-        (self.dir / "project.json").write_text(json.dumps(m, ensure_ascii=False, indent=1))
+        with self._lock:
+            m = self.meta
+            m.update(kw)
+            tmp = self.dir / "project.json.tmp"
+            tmp.write_text(json.dumps(m, ensure_ascii=False, indent=1))
+            tmp.replace(self.dir / "project.json")
         if self.on_change:
             self.on_change()
 
     def status(self, **kw):
-        m = self.meta
-        m.setdefault("status", {}).update(kw)
-        m["usage"] = self._merged_usage(m.get("usage_base", {}))
-        (self.dir / "project.json").write_text(json.dumps(m, ensure_ascii=False, indent=1))
+        with self._lock:
+            m = self.meta
+            m.setdefault("status", {}).update(kw)
+            m["usage"] = self._merged_usage(m.get("usage_base", {}))
+            tmp = self.dir / "project.json.tmp"  # atomic: the web page polls this file every second
+            tmp.write_text(json.dumps(m, ensure_ascii=False, indent=1))
+            tmp.replace(self.dir / "project.json")
+
+    def tracker(self, n: int) -> "Tracker":
+        return Tracker(self, n)
 
     def _merged_usage(self, base: dict) -> dict:
         cur = self.usage.summary()
@@ -240,17 +251,48 @@ class Project:
         return proxy if self.meta.get("proxy") and proxy.exists() else self.media
 
 
+class Tracker:
+    """Progress of one stage made of n parallel parts (chunks / batches): each part reports 0–1 as it goes —
+    from the streamed Gemini answer, so a single long call no longer sits at 0 % — and the stage shows the mean.
+    `note` says what is happening right now (uploading, waiting for Gemini, receiving…)."""
+
+    def __init__(self, p: Project, n: int):
+        self.p, self.parts, self.last, self.lock = p, [0.0] * max(1, n), 0.0, threading.Lock()
+
+    def set(self, i: int, frac: float, note: str | None = None):
+        with self.lock:
+            self.parts[i] = max(self.parts[i], min(1.0, frac))
+            now = time.time()
+            if now - self.last < 0.5 and frac < 1 and note is None:
+                return  # at most two writes a second
+            self.last = now
+            kw = {"progress": round(sum(self.parts) / len(self.parts), 4)}
+            if note is not None:
+                kw["note"] = note
+        self.p.status(**kw)
+
+    def streamer(self, i: int, measure, lo: float = 0.0, hi: float = 1.0):
+        """on_text callback for gemini.generate: measure(answer_so_far) → 0–1, mapped into [lo, hi]."""
+        first = [True]
+
+        def cb(text: str):
+            try:
+                f = max(0.0, min(1.0, measure(text)))
+            except Exception:
+                return
+            self.set(i, lo + (hi - lo) * f, note="接收 Gemini 結果" if first[0] else None)
+            first[0] = False
+        return cb
+
+
 def run_stages(p: Project, stages: list[str]):
     m = p.meta
     p.update(usage_base={"usd": (m.get("usage") or {}).get("usd", 0)})
-    p.status(state="running", stage=None, progress=0, error=None, started=time.time())
+    plan = [st for st in STAGES if st in stages and not (st == "translate" and not p.options["translate"])]
+    p.status(state="running", stage=None, progress=0, error=None, started=time.time(), steps=plan, step=0, note="")
     try:
-        for st in STAGES:
-            if st not in stages:
-                continue
-            if st == "translate" and not p.options["translate"]:
-                continue
-            p.status(stage=st, progress=0)
+        for k, st in enumerate(plan):
+            p.status(stage=st, progress=0, step=k, note="", stage_started=time.time())
             p.log(f"▶ {st}")
             t0 = time.time()
             STAGE_FN[st](p)
@@ -509,11 +551,13 @@ def stage_asr(p: Project):
     wav = p.dir / "audio.wav"
     if not wav.exists():
         p.log("抽出音軌（16 kHz mono）")
+        p.status(note="抽出音軌")
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(p.media), "-vn", "-ac", "1", "-ar", "16000",
                         str(wav)], check=True)
     if not ASR_BIN.exists():
         raise RuntimeError("bin/apple-asr 不存在，先跑 ./setup.sh")
     if not p.read("languages.json") and os.environ.get("GEMINI_API_KEY"):
+        p.status(progress=0.04, note="Gemini 判斷說話語言")
         try:
             d = detect_languages(p)
             p.log(f"  語言判斷：{languages_note(p) or d}")
@@ -526,6 +570,7 @@ def stage_asr(p: Project):
         o = p.options
         p.log(f"  自動選擇辨識語言：{loc}" + ("" if primary else "（無法判斷，預設英文）"))
     o = resolve_target(p)
+    p.status(progress=0.1, note="Apple 語音辨識")
     proc = subprocess.Popen([str(ASR_BIN), str(wav), "--locale", o["locale"]], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     duration = None
@@ -536,7 +581,7 @@ def stage_asr(p: Project):
         for line in proc.stderr:
             line = line.strip()
             if line.startswith("PROGRESS") and duration:
-                p.status(progress=min(0.99, float(line.split()[1]) / duration))
+                p.status(progress=0.1 + 0.89 * min(1.0, float(line.split()[1]) / duration))
             elif line.startswith("DURATION"):
                 duration = float(line.split()[1])
             elif line:
@@ -616,19 +661,24 @@ def stage_reference(p: Project):
     pad = 8.0
     (p.dir / "reference").mkdir(exist_ok=True)
     has_video = media_has_video(p)
-    done = [0]
+    tr = p.tracker(len(spans))
+    n = len(spans)
+    tag = lambda i: f"（第 {i + 1}/{n} 段）" if n > 1 else ""
 
     def one(i_span):
         i, (a, b) = i_span
         out = p.dir / "reference" / f"chunk_{i:03d}.json"
         if out.exists():
-            done[0] += 1
+            tr.set(i, 1)
             return
         a0, b0 = max(0, a - pad), min(duration, b + pad)
         proxy = p.dir / "reference" / f"chunk_{i:03d}.mp4"
+        tr.set(i, 0.0, note="製作低解析影片" + tag(i))
         mime = make_proxy(p, a0, b0, proxy, has_video)
         p.log(f"  參考稿 {i + 1}/{len(spans)}：上傳 {fmt_mmss(a0)}–{fmt_mmss(b0)}（{proxy.stat().st_size / 1e6:.1f} MB）")
+        tr.set(i, 0.03, note=f"上傳影片給 Gemini（{proxy.stat().st_size / 1e6:.0f} MB）" + tag(i))
         f = gemini.upload_file(proxy, mime, log=p.log)
+        tr.set(i, 0.08, note="Gemini 看影片、思考中" + tag(i))
         try:
             ctx = f" Context about the video: {o['context'].strip()}" if o["context"].strip() else ""
             gl = f" Names/terms that may appear (use these spellings): {o['glossary'].strip()}" \
@@ -646,9 +696,13 @@ def stage_reference(p: Project):
                 "`lang` = the language code of that line (en, zh-TW, ja, …); write every line in the language "
                 "it is actually spoken in."
             )
+            # progress = the newest line's start time (MM:SS into this clip) — the transcript arrives in order
+            reached = lambda text: max((int(m_) * 60 + int(s_) for m_, s_ in
+                                        re.findall(r'"t"\s*:\s*"(\d+):(\d{2})', text)), default=0) / max(1.0, b0 - a0)
             data, served = gemini.generate_json(
                 o["ref_model"], [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": prompt}],
-                schema=REF_SCHEMA, low_res=True, usage=p.usage, log=p.log, max_tokens=65536)
+                schema=REF_SCHEMA, low_res=True, usage=p.usage, log=p.log, max_tokens=65536,
+                on_text=tr.streamer(i, reached, 0.1, 0.98))
         finally:
             gemini.delete_file(f["name"])
             proxy.unlink(missing_ok=True)
@@ -662,8 +716,7 @@ def stage_reference(p: Project):
         p.write(f"reference/chunk_{i:03d}.json", {"span": [a, b], "padded": [a0, b0], "model": served,
                                                   "speakers": data.get("speakers", []),
                                                   "terms": data.get("terms", []), "lines": lines})
-        done[0] += 1
-        p.status(progress=done[0] / len(spans))
+        tr.set(i, 1)
         p.log(f"  參考稿 {i + 1}/{len(spans)}：{len(lines)} 行（{served}）")
 
     with ThreadPoolExecutor(max_workers=min(3, o["workers"])) as ex:
@@ -817,49 +870,65 @@ def stage_correct(p: Project):
 
     result: dict[int, str] = {}
     cache = p.read("corrected.json") or {}
-    done = [0]
+    tr = p.tracker(len(groups))
+    tag = lambda k: f"（第 {k + 1}/{len(groups)} 塊）" if len(groups) > 1 else ""
 
     def one(k):
         idxs = groups[k]
         if not idxs:
+            tr.set(k, 1)
             return
         key = f"{k}:{len(idxs)}:{idxs[0]}"
         if cache.get("chunks", {}).get(key):
             for i, t in cache["chunks"][key].items():
                 result[int(i)] = t
-            done[0] += 1
+            tr.set(k, 1)
             return
         a = segs[idxs[0]]["start"] - 10
         b = segs[idxs[-1]]["end"] + 10
         ref_lines = [f"[{fmt_mmss(ln['t'])}] {ln['speaker']}: {ln['text']}" for ln in ref["lines"]
                      if a <= ln["t"] <= b]
-        asr_lines = [f"[s{i} {fmt_mmss(segs[i]['start'])}–{fmt_mmss(segs[i]['end'])}"
-                     f"{' lang=' + segs[i]['lang'] if segs[i].get('lang') else ''}] {segs[i]['text']}" for i in idxs]
-        prompt = ("REFERENCE:\n" + ("\n".join(ref_lines) or "(none)") + "\n\nASR SEGMENTS:\n"
-                  + "\n".join(asr_lines))
-        parts, upl = [{"text": prompt}], None
+        upl, a0 = None, max(0.0, a)
         if o.get("correct_with_audio", True):
-            a0 = max(0.0, a)
             clip = p.dir / "reference" / f"audio_{k:03d}.m4a"
+            tr.set(k, 0.0, note="上傳音訊給 Gemini" + tag(k))
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a0:.3f}", "-t", f"{b - a0:.3f}", "-i",
                             str(p.ai_media), "-vn", "-c:a", "aac", "-b:a", "48k", "-ac", "1", str(clip)], check=True)
             upl = gemini.upload_file(clip, "audio/mp4", log=p.log)
             clip.unlink(missing_ok=True)
-            parts = [{"file_data": {"mime_type": "audio/mp4", "file_uri": upl["uri"]}},
-                     {"text": f"The audio starts at {fmt_mmss(a0)} of the video.\n\n" + prompt}]
-        got = {}
-        for attempt in range(3):
-            data, served = gemini.generate_json(o["text_model"], parts, system=system,
-                                                schema=CORR_SCHEMA, usage=p.usage, log=p.log, max_tokens=65536)
-            got = {}
-            for item in data.get("segments", []):
-                sid = item.get("id", "").lstrip("s")
+
+        def ask(ids):  # the segments still to correct (all of them at first; after a hiccup only the rest)
+            asr_lines = [f"[s{i} {fmt_mmss(segs[i]['start'])}–{fmt_mmss(segs[i]['end'])}"
+                         f"{' lang=' + segs[i]['lang'] if segs[i].get('lang') else ''}] {segs[i]['text']}" for i in ids]
+            prompt = ("REFERENCE:\n" + ("\n".join(ref_lines) or "(none)") + "\n\nASR SEGMENTS:\n"
+                      + "\n".join(asr_lines))
+            if not upl:
+                return [{"text": prompt}]
+            return [{"file_data": {"mime_type": "audio/mp4", "file_uri": upl["uri"]}},
+                    {"text": f"The audio starts at {fmt_mmss(a0)} of the video.\n\n" + prompt}]
+
+        got: dict[int, str] = {}
+        todo = list(idxs)
+        for attempt in range(4):
+            tr.set(k, 0.05, note="Gemini 聽音訊、校正中" + tag(k))
+            base = len(idxs) - len(todo)
+            measure = lambda text: (base + text.count('"id"')) / len(idxs)  # segments come back in order
+            try:
+                data, _ = gemini.generate_json(o["text_model"], ask(todo), system=system, schema=CORR_SCHEMA,
+                                               usage=p.usage, log=p.log, max_tokens=65536,
+                                               on_text=tr.streamer(k, measure, 0.05, 0.98), resume=True)
+                items = data.get("segments", [])
+            except gemini.StreamBroken as e:  # keep every complete segment that arrived; ask only for the rest
+                items = gemini.partial_items(e.partial, "segments")
+                p.log(f"  校正區塊 {k + 1}：連線中斷，保留已收到的 {len(items)} 段，只補其餘")
+            for item in items:
+                sid = str(item.get("id", "")).lstrip("s")
                 if sid.isdigit() and int(sid) in idxs:
                     got[int(sid)] = item.get("text", "")
-            missing = [i for i in idxs if i not in got]
-            if len(missing) <= max(1, len(idxs) // 50):
+            todo = [i for i in idxs if i not in got]
+            if len(todo) <= max(1, len(idxs) // 50):  # a stray missing segment keeps its ASR text
                 break
-            p.log(f"  校正區塊 {k + 1}：缺 {len(missing)} 段，重試")
+            p.log(f"  校正區塊 {k + 1}：缺 {len(todo)} 段，只重送這些")
         if upl:
             gemini.delete_file(upl["name"])
         for i in idxs:
@@ -869,8 +938,7 @@ def stage_correct(p: Project):
         with lock:
             cache.setdefault("chunks", {})[key] = {str(i): result[i] for i in idxs}
             p.write("corrected.json", cache)
-        done[0] += 1
-        p.status(progress=done[0] / len(groups))
+        tr.set(k, 1)
         changed = sum(norm(result[i]) != norm(segs[i]["text"]) for i in idxs)
         p.log(f"  校正區塊 {k + 1}/{len(groups)}：{len(idxs)} 段，改了 {changed} 段")
 
@@ -1324,7 +1392,9 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
         f"- `omit`: {omit_rule}"
         + (f"\nContext: {o['context'].strip()}" if o["context"].strip() else "")
     )
-    done, result = [0], {}
+    result = {}
+    tr = p.tracker(len(windows))
+    tag = lambda k: f"（第 {k + 1}/{len(windows)} 段）" if len(windows) > 1 else ""
 
     def one(k):
         idxs = windows[k]
@@ -1332,14 +1402,21 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
         b0 = words[idxs[-1]]["e"] + 1.0
         proxy = p.dir / "segment" / f"window_{k:03d}.mp4"
         try:
+            tr.set(k, 0.0, note="製作低解析影片" + tag(k))
             mime = make_proxy(p, a0, b0, proxy, has_video)
+            tr.set(k, 0.03, note="上傳影片給 Gemini" + tag(k))
             f = gemini.upload_file(proxy, mime, log=p.log)
+            tr.set(k, 0.08, note="Gemini 看影片、斷句中" + tag(k))
             try:
                 text = " ".join(f"[{i}@{words[i]['s'] - a0:.1f}]{words[i]['t']}" for i in idxs)
+                # progress = the newest line's last word, out of this window's words
+                reached = lambda t: (max((int(x) for x in re.findall(r'"last"\s*:\s*(\d+)', t)), default=idxs[0])
+                                     - idxs[0]) / max(1, len(idxs))
                 data, _ = gemini.generate_json(
                     o["text_model"], [{"file_data": {"mime_type": mime, "file_uri": f["uri"]}}, {"text": text}],
                     system=system, schema=SEG_SCHEMA, low_res=True, usage=p.usage, log=p.log,
-                    max_tokens=65536, thinking=o.get("seg_thinking") or None)
+                    max_tokens=65536, thinking=o.get("seg_thinking") or None,
+                    on_text=tr.streamer(k, reached, 0.1, 0.98))
             finally:
                 gemini.delete_file(f["name"])
             lines = sorted((ln for ln in data.get("lines", []) if idxs[0] <= int(ln.get("last", -1)) <= idxs[-1]),
@@ -1349,6 +1426,7 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
         except Exception as e:
             p.log(f"  語意斷句區塊 {k + 1} 失敗，這段改用規則斷句：{e}")
             result[k] = heuristic_groups([words[i] for i in idxs], o)
+            tr.set(k, 1)
             return
         finally:
             proxy.unlink(missing_ok=True)
@@ -1377,8 +1455,7 @@ def semantic_groups(p: Project, words: list[dict], o: dict) -> list[list[dict]]:
             else:
                 out.append(g)
         result[k] = out
-        done[0] += 1
-        p.status(progress=done[0] / len(windows))
+        tr.set(k, 1)
         omitted = sum(1 for g in out if g[0].get("line", {}).get("omit"))
         overl = sum(1 for g in out if g[0].get("line", {}).get("with_prev"))
         p.log(f"  語意斷句 {k + 1}/{len(windows)}：{len(out)} 行（重疊 {overl}、省略附和 {omitted}）")
@@ -1610,24 +1687,33 @@ def stage_translate(p: Project, only_missing: bool = False):
             out.append(cur)
         return out
 
-    def translate(batch) -> dict[int, str]:
-        """Translate one batch; returns {cue index: translation} for answers that pass the echo check."""
+    def translate(batch, ti) -> dict[int, str]:
+        """Translate one batch; returns {cue index: translation} for answers that pass the echo check. A retry
+        (failed check, missing answers, dropped connection) only resends the sentences still missing."""
         ctx_before = cues[max(0, batch[0] - 4):batch[0]]
         ctx_after = cues[batch[-1] + 1:batch[-1] + 3]
-        payload = {
-            "context_before (do not translate)": [c["text"] for c in ctx_before],
-            "sentences": [[{"id": cues[i]["id"], "text": cues[i]["text"]} for i in g]
-                          for g in sentence_groups(cues, batch)],
-            "context_after (do not translate)": [c["text"] for c in ctx_after],
-        }
-        prompt = json.dumps(payload, ensure_ascii=False, indent=1)  # JSON: a line break in a cue can't shift ids
         by_id = {cues[i]["id"]: i for i in batch}
         good: dict[int, str] = {}
         for attempt in range(3):
-            data, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system, schema=TR_SCHEMA,
-                                           usage=p.usage, log=p.log, max_tokens=32768, thinking="low")
+            payload = {
+                "context_before (do not translate)": [c["text"] for c in ctx_before],
+                "sentences": [[{"id": cues[i]["id"], "text": cues[i]["text"]} for i in g]
+                              for g in sentence_groups(cues, batch) if any(i not in good for i in g)],
+                "context_after (do not translate)": [c["text"] for c in ctx_after],
+            }
+            prompt = json.dumps(payload, ensure_ascii=False, indent=1)  # JSON: a line break can't shift ids
+            base = len(good)
+            measure = lambda text: (base + text.count('"id"')) / len(batch)  # answers come back in order
+            try:
+                data, _ = gemini.generate_json(o["text_model"], [{"text": prompt}], system=system,
+                                               schema=TR_SCHEMA, usage=p.usage, log=p.log, max_tokens=32768,
+                                               thinking="low", on_text=tr.streamer(ti, measure), resume=True)
+                items = data.get("items", [])
+            except gemini.StreamBroken as e:  # keep the complete answers that arrived; ask only for the rest
+                items = gemini.partial_items(e.partial, "items")
+                p.log(f"  翻譯：連線中斷，保留已收到的 {len(items)} 條，只補其餘")
             bad = 0
-            for it in data.get("items", []):
+            for it in items:
                 i = by_id.get(it.get("id"))
                 same = bool(it.get("same"))
                 if i is None or (not it.get("tr", "").strip() and not same):
@@ -1646,12 +1732,13 @@ def stage_translate(p: Project, only_missing: bool = False):
             p.log(f"  翻譯對位檢查：{bad} 條對不上、{len(batch) - len(good)} 條缺，重譯這批（第 {attempt + 2} 次）")
         return good
 
-    def one(batch):
-        good = translate(batch)
+    def one(ti_batch):
+        ti, batch = ti_batch
+        good = translate(batch, ti)
         missing = [i for i in batch if i not in good]
         if missing:  # still unverified → smaller batches give the model less to keep in step
             for small in make_batches(missing, 8):
-                good.update(translate(small))
+                good.update(translate(small, ti))
         with lock:
             for i in batch:
                 if i in good:
@@ -1660,13 +1747,13 @@ def stage_translate(p: Project, only_missing: bool = False):
                 else:
                     stats["rejected"] += 1
             p.write("cues.json", doc)
-            done[0] += 1
-            p.status(progress=done[0] / len(batches))
+        tr.set(ti, 1)
 
     batches = make_batches(todo, 50)
-    done = [0]
+    tr = p.tracker(len(batches))
+    p.status(note=f"Gemini 翻譯中（{len(todo)} 條，分 {len(batches)} 批）")
     with ThreadPoolExecutor(max_workers=o["workers"]) as ex:
-        list(ex.map(one, batches))
+        list(ex.map(one, enumerate(batches)))
     fixed = apply_cjk_spacing(cues, o)
     if fixed:
         p.write("cues.json", doc)

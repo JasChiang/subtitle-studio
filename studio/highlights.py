@@ -76,8 +76,11 @@ def summarize(p: Project, req: dict):
         + (f"\nExtra instructions from the user: {req['note'].strip()}" if req.get("note", "").strip() else "")
     )
     p.log(f"摘要：送出 {len(cues)} 條字幕")
+    p.status(note="Gemini 讀逐字稿、思考中")
+    expect = 2500 + 6 * len(cues)  # rough answer size (characters): there is no natural unit to count here
     data, served = gemini.generate_json(o["text_model"], [{"text": transcript_lines(cues)}], system=system,
-                                        schema=SUM_SCHEMA, usage=p.usage, log=p.log, max_tokens=32768)
+                                        schema=SUM_SCHEMA, usage=p.usage, log=p.log, max_tokens=32768,
+                                        on_text=p.tracker(1).streamer(0, lambda t: len(t) / expect, 0.05, 0.95))
     by_id = {c["id"]: c for c in cues}
     for ch in data.get("chapters", []):
         ch["t"] = by_id.get(ch.get("cue"), cues[0])["start"]
@@ -234,7 +237,7 @@ def lowres_concat(p: Project, pieces: list[tuple[float, float]], out: Path, has_
 
 
 def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str, cues: list[dict], cuts, dur,
-                     handle: float = 18.0) -> dict:
+                     handle: float = 18.0, tr=None) -> dict:
     """Paper edit → rough cut → watch. Gemini watches (1) the rough cut of the draft and (2) a CONTEXT reel with
     every clip plus `handle` seconds of source before/after it (overlaps merged), so extending or swapping a
     sentence is judged on what it actually sounds/looks like. Answers in sentence ids only."""
@@ -275,12 +278,18 @@ def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str
     work.mkdir(parents=True, exist_ok=True)
     rough, ctx = work / "rough.mp4", work / "context.mp4"
     has_video = media_has_video(p)
+    if tr:
+        tr.set(0, 0.37, note="製作粗剪給剪輯師看")
     mime = lowres_concat(p, pieces, rough, has_video)
     lowres_concat(p, merged, ctx, has_video)
     p.log(f"  看粗剪複查：上傳粗剪 {off:.0f} 秒＋前後文 {xoff:.0f} 秒"
           f"（{(rough.stat().st_size + ctx.stat().st_size) / 1e6:.1f} MB）")
+    if tr:
+        tr.set(0, 0.5, note="上傳粗剪給 Gemini")
     f1 = gemini.upload_file(rough, mime, log=p.log)
     f2 = gemini.upload_file(ctx, mime, log=p.log)
+    if tr:
+        tr.set(0, 0.56, note="剪輯師看粗剪、思考中")
     try:
         system = ("You are the senior editor reviewing the ROUGH CUT of a highlight reel before it is approved. You "
                   "WATCH it — not just read it.\n" + rules +
@@ -304,7 +313,8 @@ def review_rough_cut(p: Project, data: dict, by_k: dict, script: str, rules: str
             [{"text": "VIDEO 1 (rough cut):"}, {"file_data": {"mime_type": mime, "file_uri": f1["uri"]}},
              {"text": "VIDEO 2 (context with handles):"}, {"file_data": {"mime_type": mime, "file_uri": f2["uri"]}},
              {"text": prompt}],
-            system=system, schema=PLAN_SCHEMA, low_res=True, usage=p.usage, log=p.log, max_tokens=32768)
+            system=system, schema=PLAN_SCHEMA, low_res=True, usage=p.usage, log=p.log, max_tokens=32768,
+            on_text=tr.streamer(0, lambda t: len(t) / max(1500, len(json.dumps(data))), 0.6, 0.97) if tr else None)
     finally:
         gemini.delete_file(f1["name"])
         gemini.delete_file(f2["name"])
@@ -350,8 +360,13 @@ def plan_highlight(p: Project, req: dict) -> str:
     system = ("You are a senior video editor cutting a short highlight reel from a long interview, working "
               "from its transcript split into numbered sentences with speakers.\n" + rules)
     p.log(f"精華企劃：{secs} 秒｜{focus or '（由 AI 挑選最精彩的段落）'}｜{len(units)} 個句子")
+    review = req.get("review", True)
+    tr = p.tracker(1)
+    tr.set(0, 0.02, note="Gemini 讀逐字稿、挑段落")
+    expect = 600 + 25 * secs  # rough answer size (characters)
     data, served = gemini.generate_json(o["text_model"], [{"text": script}], system=system, schema=PLAN_SCHEMA,
-                                        usage=p.usage, log=p.log, max_tokens=32768)
+                                        usage=p.usage, log=p.log, max_tokens=32768,
+                                        on_text=tr.streamer(0, lambda t: len(t) / expect, 0.05, 0.35 if review else 0.95))
     by_k = {u["k"]: u for u in units}
 
     def dur(d):
@@ -366,7 +381,7 @@ def plan_highlight(p: Project, req: dict) -> str:
     draft = data
     if req.get("review", True):  # second pass: the editor WATCHES a rough cut of the draft and fixes it
         try:
-            data = review_rough_cut(p, data, by_k, script, rules, cues, cuts, dur)
+            data = review_rough_cut(p, data, by_k, script, rules, cues, cuts, dur, tr=tr)
         except Exception as e:
             p.log(f"  看粗剪複查失敗，沿用初稿：{e}")
 
@@ -663,6 +678,7 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
         tag_ev.append((t0 + cd, t1, ft))
         blur_spans.append((t0, t0 + cd))
     p.log(f"  繪製 {len(items) - 1} 張字幕／字卡圖")
+    p.status(progress=0.01, note=f"繪製 {len(items) - 1} 張字幕／字卡圖")
     draw_overlays(items, W, H, han=han_variant(p.options), scale=sub_scale(p))
     blank = str(work / "blank.png")
     tracks = []
@@ -709,10 +725,13 @@ def render_plan(p: Project, plan: dict, out: Path, srt_path: Path, work: Path, l
            "-c:a", "aac", "-b:a", "192k", "-dn",
            "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(tmp)]
     p.log(f"輸出{label}：{n} 段、{len(subs)} 條字幕、{total:.1f} 秒（{'硬體' if hw_encoder() else '軟體'}編碼，{fps} fps）")
+    p.status(progress=0.08, note="編碼影片")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last = 0.0
     for line in proc.stdout:
-        if line.startswith("out_time_us=") and line.strip().split("=")[1].isdigit():
-            p.status(progress=min(0.99, int(line.split("=")[1]) / 1e6 / total))
+        if line.startswith("out_time_us=") and line.strip().split("=")[1].isdigit() and time.time() - last > 0.5:
+            last = time.time()
+            p.status(progress=0.08 + 0.91 * min(1.0, int(line.split("=")[1]) / 1e6 / total))
     err = proc.stderr.read()
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg 失敗：" + err[-600:])

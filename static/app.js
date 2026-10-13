@@ -62,12 +62,28 @@ async function boot() {
   requestAnimationFrame(tick);
 }
 
+// ───────── progress: the whole run, not just the current stage
+// rough share of the run time per stage (measured on a 6.5-min video: ~13 s ASR, 76–91 s reference,
+// 55–69 s correction, 54–68 s line breaks, 11–19 s translation)
+const STAGE_WEIGHT = { proxy: 2, asr: 1, reference: 6, correct: 5, cues: 5, translate: 1.5 };
+const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+function runProgress(st) {
+  const steps = st.steps?.length ? st.steps : [st.stage], k = Math.max(0, steps.indexOf(st.stage));
+  const w = (x) => STAGE_WEIGHT[x] ?? 1, total = steps.reduce((a, x) => a + w(x), 0) || 1;
+  const overall = (steps.slice(0, k).reduce((a, x) => a + w(x), 0) + w(st.stage) * (st.progress || 0)) / total;
+  const elapsed = st.started ? Math.max(0, Date.now() / 1000 - st.started) : 0;
+  const eta = overall > 0.05 && elapsed > 5 ? elapsed * (1 - overall) / overall : null;
+  const name = STAGE_INFO[st.stage]?.[0] || "…";
+  const head = steps.length > 1 ? `第 ${k + 1}／${steps.length} 步：${name}` : name;
+  return { overall, head, pct: Math.round((st.progress || 0) * 100), note: st.note || "", elapsed, eta };
+}
+
 async function refreshProjects() {
   S.projects = await api("/api/projects");
   const ul = $("#projectList");
   ul.innerHTML = S.projects.map((p) => {
     const st = p.status?.state || "idle";
-    const lab = st === "running" ? `執行中：${STAGE_INFO[p.status.stage]?.[0] || ""} ${Math.round((p.status.progress || 0) * 100)}%`
+    const lab = st === "running" ? `執行中：${STAGE_INFO[p.status.stage]?.[0] || ""}（整體 ${Math.round(runProgress(p.status).overall * 100)}%）`
       : st === "error" ? "上次執行出錯" : (p.done || []).length ? `已完成到「${STAGE_INFO[p.done.at(-1)][0]}」` : "還沒開始處理";
     return `<li data-id="${esc(p.id)}" class="${S.cur?.id === p.id ? "sel" : ""}"><div class="pn" title="${esc(p.name)}">${esc(p.name)}</div>
       <div class="ps">${p.duration ? fmt(p.duration).slice(0, -4) + " · " : ""}${esc(lab)}</div></li>`;
@@ -125,8 +141,10 @@ function renderStatus(m) {
   const running = m.running || st.state === "running";
   $("#runBtn").disabled = running;
   $("#trMissingBtn").disabled = running;
-  $("#progBar").style.width = running ? `${Math.round((st.progress || 0) * 100)}%` : st.state === "done" ? "100%" : "0";
-  let line = running ? `執行中：${STAGE_INFO[st.stage]?.[0] || "…"} ${Math.round((st.progress || 0) * 100)}%`
+  const rp = running ? runProgress(st) : null;
+  $("#progBar").style.width = running ? `${(rp.overall * 100).toFixed(1)}%` : st.state === "done" ? "100%" : "0";
+  let line = running ? `<b>${esc(rp.head)} ${rp.pct}%</b>${rp.note ? `<span class="note">${esc(rp.note)}</span>` : ""}
+      <span class="time">已 ${mmss(rp.elapsed)}${rp.eta != null ? `・約剩 ${mmss(rp.eta)}` : ""}・整體 ${Math.round(rp.overall * 100)}%</span>`
     : st.state === "error" ? `<span class="err">錯誤：${esc(st.error)}</span>` : st.state === "done" ? "完成" : "";
   $("#statusLine").innerHTML = line;
   const log = $("#log");

@@ -1,9 +1,11 @@
-"""Minimal Gemini REST client (stdlib only): File API upload, generateContent, usage ledger.
+"""Minimal Gemini REST client (stdlib only): File API upload, generateContent (optionally streamed, for live
+progress), usage ledger.
 
-Requested model first, then a fallback chain on transient errors.
+Requested model first, then a fallback chain on transient errors — including dropped connections and timeouts.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import ssl
@@ -15,7 +17,7 @@ from pathlib import Path
 
 BASE = "https://generativelanguage.googleapis.com"
 FALLBACK = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"]
-TRANSIENT = {408, 429, 500, 502, 503, 504}
+TRANSIENT = {0, 408, 429, 500, 502, 503, 504}  # 0 = the connection failed / dropped / timed out
 
 # USD per 1M tokens (input, output) — rough, for the cost readout only.
 PRICES = {
@@ -27,6 +29,15 @@ PRICES = {
 
 class GeminiError(RuntimeError):
     pass
+
+
+class StreamBroken(GeminiError):
+    """A streamed answer stopped part-way (only raised with resume=True): `partial` is the text received so far,
+    so the caller can keep the complete items and ask again only for the rest."""
+
+    def __init__(self, msg: str, partial: str):
+        super().__init__(msg)
+        self.partial = partial
 
 
 def api_key() -> str:
@@ -102,10 +113,56 @@ def _request(url: str, *, data: bytes | None = None, headers: dict | None = None
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as e:  # offline, reset, timeout, sleep
+        return 0, {}, f"network: {e}".encode()
+
+
+def _stream(url: str, payload: bytes, on_text, timeout: float = 300):
+    """streamGenerateContent (server-sent events). Calls on_text(answer_so_far) as text arrives.
+    Returns (status, text, usage, finish_reason, error_body); status 0 = the stream broke (text = what arrived)."""
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    parts: list[str] = []
+    usage, finish = None, None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                obj = json.loads(line[5:])
+                if obj.get("error"):
+                    return int(obj["error"].get("code") or 0), "".join(parts), usage, None, line.encode()
+                usage = obj.get("usageMetadata") or usage
+                for c in (obj.get("candidates") or [])[:1]:
+                    finish = c.get("finishReason") or finish
+                    new = [q["text"] for q in (c.get("content") or {}).get("parts", [])
+                           if q.get("text") and not q.get("thought")]
+                    if new:
+                        parts.extend(new)
+                        if on_text:
+                            on_text("".join(parts))
+    except urllib.error.HTTPError as e:
+        return e.code, "", None, None, e.read()
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
+        return 0, "".join(parts), usage, None, f"stream broke: {e}".encode()
+    if finish is None:  # the connection closed without the final chunk
+        return 0, "".join(parts), usage, None, b"stream ended early"
+    return 200, "".join(parts), usage, finish, None
 
 
 def upload_file(path: Path, mime: str, log=print) -> dict:
     """Resumable upload; waits until the file is ACTIVE. Returns the file resource (name, uri, mimeType)."""
+    for attempt in range(3):
+        try:
+            return _upload(path, mime)
+        except GeminiError as e:
+            if attempt == 2 or not getattr(e, "transient", False):
+                raise
+            log(f"  … 上傳失敗（{e}），重試")
+            time.sleep(3 * (attempt + 1))
+
+
+def _upload(path: Path, mime: str) -> dict:
     k = api_key()
     size = path.stat().st_size
     status, headers, body = _request(
@@ -123,10 +180,10 @@ def upload_file(path: Path, mime: str, log=print) -> dict:
     if status >= 300:
         if b"spend" in body and b"cap" in body:
             raise GeminiError("Gemini 專案已達月度花費上限（到 https://ai.studio/spend 調整）")
-        raise GeminiError(f"upload start {status}: {body[:300].decode(errors='replace')}")
+        raise _err(f"upload start {status}: {body[:300].decode(errors='replace')}", status)
     upload_url = next((v for h, v in headers.items() if h.lower() == "x-goog-upload-url"), None)
     if not upload_url:
-        raise GeminiError("upload: no upload URL")
+        raise _err("upload: no upload URL", 0)
     status, _, body = _request(
         upload_url,
         data=path.read_bytes(),
@@ -135,7 +192,7 @@ def upload_file(path: Path, mime: str, log=print) -> dict:
         method="POST",
     )
     if status >= 300:
-        raise GeminiError(f"upload {status}: {body[:300]!r}")
+        raise _err(f"upload {status}: {body[:300].decode(errors='replace')}", status)
     f = json.loads(body)["file"]
     for _ in range(300):
         if f.get("state") == "ACTIVE":
@@ -149,6 +206,12 @@ def upload_file(path: Path, mime: str, log=print) -> dict:
     raise GeminiError("file never became ACTIVE")
 
 
+def _err(msg: str, status: int) -> GeminiError:
+    e = GeminiError(msg)
+    e.transient = status in TRANSIENT
+    return e
+
+
 def delete_file(name: str):
     try:
         _request(f"{BASE}/v1beta/{name}?key={api_key()}", method="DELETE", timeout=30)
@@ -158,8 +221,11 @@ def delete_file(name: str):
 
 def generate(model: str, parts: list[dict], *, system: str | None = None, schema: dict | None = None,
              max_tokens: int = 32768, low_res: bool = False, usage: Usage | None = None,
-             log=print, temperature: float | None = None, thinking: str | None = None) -> tuple[str, str]:
-    """Returns (text, model_that_served). Retries transient errors across the fallback chain."""
+             log=print, temperature: float | None = None, thinking: str | None = None,
+             on_text=None, resume: bool = False) -> tuple[str, str]:
+    """Returns (text, model_that_served). Retries transient errors (incl. dropped connections) across the fallback
+    chain. on_text: stream the answer and call on_text(answer_so_far) as it arrives (live progress). resume: when
+    a stream breaks after some text arrived, raise StreamBroken(partial) instead of asking for everything again."""
     k = api_key()
     gen: dict = {"maxOutputTokens": max_tokens}
     if temperature is not None:
@@ -180,24 +246,35 @@ def generate(model: str, parts: list[dict], *, system: str | None = None, schema
     last = None
     for m in chain:
         for attempt in range(3):
-            status, _, raw = _request(f"{BASE}/v1beta/models/{m}:generateContent?key={k}", data=payload,
-                                      headers={"Content-Type": "application/json"}, method="POST")
-            if status < 300:
-                obj = json.loads(raw)
-                if usage and obj.get("usageMetadata"):
-                    usage.record(m, obj["usageMetadata"])
-                cands = obj.get("candidates") or []
-                text = "".join(p.get("text", "") for c in cands[:1]
-                               for p in (c.get("content") or {}).get("parts", []) if not p.get("thought"))
+            if on_text:
+                status, text, meta, finish, raw = _stream(
+                    f"{BASE}/v1beta/models/{m}:streamGenerateContent?alt=sse&key={k}", payload, on_text)
+                if usage and meta:
+                    usage.record(m, meta)
+                if status == 0 and resume and text.strip():
+                    raise StreamBroken(f"{m}: {raw.decode(errors='replace')}", text)
+            else:
+                status, _, raw = _request(f"{BASE}/v1beta/models/{m}:generateContent?key={k}", data=payload,
+                                          headers={"Content-Type": "application/json"}, method="POST")
+                text, finish = "", None
+                if status < 300:
+                    obj = json.loads(raw)
+                    if usage and obj.get("usageMetadata"):
+                        usage.record(m, obj["usageMetadata"])
+                    cands = obj.get("candidates") or []
+                    finish = cands[:1] and cands[0].get("finishReason")
+                    text = "".join(p.get("text", "") for c in cands[:1]
+                                   for p in (c.get("content") or {}).get("parts", []) if not p.get("thought"))
+            if status and status < 300:
                 if text.strip():
                     if m != model:
                         log(f"  ↪ {model} 不可用，改由 {m} 回應")
                     return text, m
-                last = GeminiError(f"{m}: empty response ({cands[:1] and cands[0].get('finishReason')})")
+                last = GeminiError(f"{m}: empty response ({finish})")
             elif status == 429 and (b"spending cap" in raw or b"spend cap" in raw):
                 raise GeminiError(f"{m}: Gemini 專案已達月度花費上限（到 https://ai.studio/spend 調整）")
             elif status in TRANSIENT:
-                last = GeminiError(f"{m}: HTTP {status}")
+                last = GeminiError(f"{m}: " + (raw[:200].decode(errors="replace") if status == 0 else f"HTTP {status}"))
             else:
                 raise GeminiError(f"{m}: HTTP {status}: {raw[:400].decode(errors='replace')}")
             log(f"  … {last}，重試")
@@ -211,3 +288,40 @@ def generate_json(model: str, parts: list[dict], **kw):
     if t.startswith("```"):
         t = t.strip("`").removeprefix("json").strip()
     return json.loads(t), served
+
+
+def partial_items(text: str, key: str) -> list[dict]:
+    """The complete objects of the JSON array `key` in a possibly cut-off answer: '{"items":[{…},{…},{"id":3,"t'
+    → the first two. Used to keep what a broken stream already delivered."""
+    i = text.find(f'"{key}"')
+    i = text.find("[", i) if i >= 0 else -1
+    if i < 0:
+        return []
+    out, depth, start, in_str, esc = [], 0, None, False, False
+    for j in range(i + 1, len(text)):
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = j
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    out.append(json.loads(text[start:j + 1]))
+                except ValueError:
+                    pass
+                start = None
+        elif ch == "]" and depth == 0:
+            break
+    return out

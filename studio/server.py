@@ -125,7 +125,9 @@ def start_task(p: pipeline.Project, stage: str, fn):
     p.update(usage_base={"usd": (m.get("usage") or {}).get("usd", 0)})
 
     def work():
-        p.status(state="running", stage=stage, progress=0, error=None)
+        now = time.time()
+        p.status(state="running", stage=stage, progress=0, error=None, note="", steps=[stage], step=0,
+                 started=now, stage_started=now)
         try:
             fn()
             p.status(state="done", stage=None, progress=1)
@@ -434,7 +436,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("這個專案正在執行中")
 
                 def work():
-                    p.status(state="running", stage="translate", progress=0, error=None)
+                    now = time.time()
+                    p.status(state="running", stage="translate", progress=0, error=None, note="",
+                             steps=["translate"], step=0, started=now, stage_started=now)
                     try:
                         pipeline.stage_translate(p, only_missing=True)
                         p.status(state="done", stage=None, progress=1)
